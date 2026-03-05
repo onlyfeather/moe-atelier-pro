@@ -18,10 +18,7 @@ import {
 } from 'antd';
 import {
   ApiFilled,
-  ExperimentFilled,
-  KeyOutlined,
   ReloadOutlined,
-  SafetyCertificateFilled,
   SettingFilled,
   ThunderboltFilled,
 } from '@ant-design/icons';
@@ -43,17 +40,6 @@ interface ConfigDrawerProps {
   models: { label: string; value: string }[];
   loadingModels: boolean;
   fetchModels: () => void;
-  backendSwitchChecked: boolean;
-  backendSyncing: boolean;
-  backendAuthLoading: boolean;
-  backendMode: boolean;
-  backendAuthPending: boolean;
-  backendPassword: string;
-  onBackendPasswordChange: (value: string) => void;
-  onBackendEnable: () => void;
-  onBackendDisable: () => void;
-  onBackendAuthCancel: () => void;
-  onBackendAuthConfirm: () => void;
 }
 
 const ConfigDrawer: React.FC<ConfigDrawerProps> = ({
@@ -65,17 +51,6 @@ const ConfigDrawer: React.FC<ConfigDrawerProps> = ({
   models,
   loadingModels,
   fetchModels,
-  backendSwitchChecked,
-  backendSyncing,
-  backendAuthLoading,
-  backendMode,
-  backendAuthPending,
-  backendPassword,
-  onBackendPasswordChange,
-  onBackendEnable,
-  onBackendDisable,
-  onBackendAuthCancel,
-  onBackendAuthConfirm,
 }) => (
   <Drawer
     title={
@@ -94,7 +69,7 @@ const ConfigDrawer: React.FC<ConfigDrawerProps> = ({
         >
           <SettingFilled />
         </div>
-        <span style={{ fontWeight: 800, fontSize: 18, color: '#665555' }}>系统配置</span>
+        <span style={{ fontWeight: 800, fontSize: 18, color: '#665555' }}>生成设置</span>
       </Space>
     }
     placement="right"
@@ -104,7 +79,8 @@ const ConfigDrawer: React.FC<ConfigDrawerProps> = ({
     styles={{ body: { padding: 24 } }}
   >
     <Form layout="vertical" initialValues={config} onValuesChange={onConfigChange} form={form}>
-      <Form.Item label={<span style={{ fontWeight: 700, color: '#665555' }}>API 格式</span>}>
+      <div style={{ display: 'none' }}>
+        <Form.Item label={<span style={{ fontWeight: 700, color: '#665555' }}>API 格式</span>}>
         <Form.Item name="apiFormat" noStyle>
           <Radio.Group optionType="button" buttonStyle="solid">
             <Radio.Button value="openai">OpenAI</Radio.Button>
@@ -152,25 +128,28 @@ const ConfigDrawer: React.FC<ConfigDrawerProps> = ({
         }}
       </Form.Item>
 
-      <Form.Item name="apiKey" label={<span style={{ fontWeight: 700, color: '#665555' }}>API 密钥</span>}>
-        <Input.Password size="large" placeholder="sk-..." prefix={<SafetyCertificateFilled style={{ color: '#FF9EB5' }} />} />
-      </Form.Item>
-
+      </div>
       <Form.Item label={<span style={{ fontWeight: 700, color: '#665555' }}>模型名称</span>} style={{ marginBottom: 48 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <div style={{ flex: 1 }}>
             <Form.Item name="model" noStyle>
-              <AutoComplete
+              <Select
+                showSearch
+                allowClear
                 className="model-autocomplete"
                 options={models}
+                placeholder="选择模型"
+                optionFilterProp="label"
                 filterOption={(inputValue, option) =>
                   option!.value.toUpperCase().indexOf(inputValue.toUpperCase()) !== -1
                 }
                 dropdownMatchSelectWidth={false}
                 dropdownStyle={{ minWidth: 300 }}
-              >
-                <Input size="large" placeholder="请输入模型名称" prefix={<ExperimentFilled style={{ color: '#FF9EB5' }} />} />
-              </AutoComplete>
+                onDropdownVisibleChange={(open) => {
+                  if (!open || loadingModels) return;
+                  if (models.length === 0) fetchModels();
+                }}
+              />
             </Form.Item>
           </div>
           <Tooltip title="获取模型列表">
@@ -378,77 +357,11 @@ const ConfigDrawer: React.FC<ConfigDrawerProps> = ({
         }}
       </Form.Item>
 
-      <div
-        style={{
-          background: '#F1F7FF',
-          padding: '16px',
-          borderRadius: 16,
-          marginBottom: 24,
-          border: '1px dashed #91C1FF',
-        }}
-      >
-        <Form.Item label={<span style={{ fontWeight: 700, color: '#665555' }}>后端模式</span>} style={{ marginBottom: 8 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
-            <Text type="secondary" style={{ fontSize: 13, flex: 1 }}>
-              开启后将配置与任务缓存到服务器，支持多端同步
-            </Text>
-            <Switch
-              checked={backendSwitchChecked}
-              loading={backendSyncing}
-              disabled={backendAuthLoading}
-              onChange={(checked) => {
-                if (checked) {
-                  if (!backendMode) {
-                    onBackendEnable();
-                  }
-                } else {
-                  if (backendMode) {
-                    onBackendDisable();
-                  } else {
-                    onBackendAuthCancel();
-                  }
-                }
-              }}
-            />
-          </div>
-        </Form.Item>
-        <div style={{ marginTop: 16 }}>
-          <Text type="secondary" style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.5, display: 'block' }}>
-            需要在服务端 .env 中设置 BACKEND_PASSWORD。开启后生图请求将由服务器执行并自动缓存。
-          </Text>
-        </div>
-        <div className={`password-collapse-container ${backendAuthPending && !backendMode ? 'open' : ''}`}>
-          <div className="password-content-wrapper">
-            <Space direction="vertical" size={8} style={{ width: '100%' }}>
-              <Text type="secondary" style={{ fontSize: 12, color: '#6B7280' }}>
-                请输入 .env 中配置的 BACKEND_PASSWORD。
-              </Text>
-              <Input.Password
-                size="large"
-                value={backendPassword}
-                placeholder="后端密码"
-                prefix={<KeyOutlined style={{ color: '#FF9EB5', fontSize: 18 }} />}
-                onChange={(e) => onBackendPasswordChange(e.target.value)}
-                onPressEnter={() => void onBackendAuthConfirm()}
-              />
-              <Space size={8}>
-                <Button size="small" onClick={() => void onBackendAuthConfirm()} loading={backendAuthLoading} type="primary">
-                  验证
-                </Button>
-                <Button size="small" type="text" onClick={onBackendAuthCancel}>
-                  取消
-                </Button>
-              </Space>
-            </Space>
-          </div>
-        </div>
-      </div>
-
       <div style={{ marginTop: 24, padding: 16, background: '#FFF8E1', borderRadius: 16, border: '1px dashed #FFC107' }}>
         <Space align="start">
           <ThunderboltFilled style={{ color: '#FFC107', marginTop: 4, fontSize: 16 }} />
           <Text type="secondary" style={{ fontSize: 13, color: '#8D6E63', lineHeight: 1.5 }}>
-            设置将自动应用于所有活动任务窗口。请确保您的 API 密钥有足够的配额。
+            设置将自动应用于所有活动任务窗口。API 配置由管理员统一管理。
           </Text>
         </Space>
       </div>

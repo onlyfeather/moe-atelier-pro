@@ -7,6 +7,13 @@ services:
       - "5173:5173"
     environment:
       - PORT=5173
+      - SESSION_SECRET=9f3c7e6a1b2d4f5e8a0c3b7d9e2f4a6c7b8d1e3f5a7c9e0b2d4f6a8c1e3b5d7
+      - SESSION_TTL=604800
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=K8vX3pQ7rT2mN9yL5sG1aH4j
+      - BACKEND_LOG_REQUESTS=false
+      - BACKEND_LOG_OUTBOUND=false
+      - BACKEND_LOG_RESPONSE=false
     volumes:
       - saved-images:/app/saved-images
       - server-data:/app/server-data

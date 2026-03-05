@@ -114,6 +114,19 @@ const extractImageFromMessage = (message: any): string | null => {
 };
 
 export const resolveImageFromResponse = (data: any): string | null => {
+  if (typeof data === 'string') {
+    const trimmed = data.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed);
+      return resolveImageFromResponse(parsed);
+    } catch {
+      return parseMarkdownImage(trimmed) || normalizeImageUrl(trimmed);
+    }
+  }
+  if (data?.data && !data?.choices && typeof data?.data === 'object') {
+    return resolveImageFromResponse(data.data);
+  }
   const resultUrl = data?.resultUrl ?? data?.result_url;
   if (typeof resultUrl === 'string') {
     const normalized = normalizeImageUrl(resultUrl);

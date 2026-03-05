@@ -458,10 +458,8 @@ const PromptCard: React.FC<PromptCardProps> = ({
 };
 
 const DEFAULT_DATA_SOURCE = 'https://raw.githubusercontent.com/unknowlei/nanobanana-website/refs/heads/main/public/data.json';
-const PROMPT_MANAGER_SOURCE = '/api/prompt-manager';
 const BUILTIN_SOURCES = [
-  { label: 'nanobanana-website', value: DEFAULT_DATA_SOURCE },
-  { label: 'Prompt-Manager', value: PROMPT_MANAGER_SOURCE }
+  { label: 'nanobanana-website', value: DEFAULT_DATA_SOURCE }
 ];
 const PROMO_NOTE_PATTERNS = [/labnana/i, /aff=/i, /邀请链接/, /分享给你试试/, /通过我的邀请链接/];
 const NSFW_KEYWORDS = ['猎奇', '恐怖'];
@@ -542,8 +540,6 @@ const normalizePromptManagerData = (payload: { data?: Record<string, unknown>[] 
   return {
     sections: [
       {
-        id: 'prompt-manager',
-        title: 'Prompt-Manager',
         prompts
       }
     ]
@@ -583,8 +579,8 @@ const formatPromptTime = (prompt: Pick<PromptItem, 'id' | 'createdAt' | 'images'
   const pad = (value: number) => String(value).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
-const STORAGE_KEY_FAVORITES = 'moe-atelier:favorites';
-const STORAGE_KEY_SOURCE = 'moe-atelier:prompt-source';
+const STORAGE_KEY_FAVORITES = 'moe-atelier-pro:favorites';
+const STORAGE_KEY_SOURCE = 'moe-atelier-pro:prompt-source';
 const NEW_WINDOW_MS = 48 * 60 * 60 * 1000;
 const CONTRIBUTOR_HEADER_EXPANDED_HEIGHT = 200;
 const CONTRIBUTOR_HEADER_COLLAPSED_HEIGHT = 80;
@@ -605,7 +601,6 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
   const [data, setData] = useState<PromptData | null>(null);
   const [loading, setLoading] = useState(false);
   const isBuiltInSource = BUILTIN_SOURCES.some(source => source.value === sourceUrl);
-  const isPromptManagerSource = sourceUrl === PROMPT_MANAGER_SOURCE;
   
   // Tabs: 'all', 'new', 'favorites', or sectionId
   const [activeTab, setActiveTab] = useState<string>('all');
@@ -762,10 +757,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
       const response = await fetch(sourceUrl);
       if (!response.ok) throw new Error('Network response was not ok');
       const jsonData = await response.json();
-      const normalizedData = sourceUrl === PROMPT_MANAGER_SOURCE
-        ? normalizePromptManagerData(jsonData)
-        : jsonData;
-      setData(normalizedData);
+      setData(jsonData);
     } catch (error) {
       message.error('获取数据失败，请检查链接是否正确');
       console.error('Fetch error:', error);
@@ -776,22 +768,18 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
 
   useEffect(() => {
     if (!visible || !sourceUrl) return;
-    if (prevSourceRef.current === sourceUrl) return;
+    const sourceChanged = prevSourceRef.current !== sourceUrl;
     prevSourceRef.current = sourceUrl;
-    if (!isBuiltInSource) return;
-    setActiveTab('all');
-    setSelectedTags([]);
-    setSearchText('');
-    setSelectedContributor(null);
-    setContributorActiveSection('all');
-    setContributorSelectedTags([]);
+    if (sourceChanged && isBuiltInSource) {
+      setActiveTab('all');
+      setSelectedTags([]);
+      setSearchText('');
+      setSelectedContributor(null);
+      setContributorActiveSection('all');
+      setContributorSelectedTags([]);
+    }
     fetchData();
   }, [visible, sourceUrl, isBuiltInSource, fetchData]);
-
-  useEffect(() => {
-    if (!visible || !sourceUrl || isBuiltInSource || data) return;
-    fetchData();
-  }, [visible, sourceUrl, isBuiltInSource, data, fetchData]);
 
   useEffect(() => {
     safeStorageSet(STORAGE_KEY_FAVORITES, JSON.stringify(favorites));
@@ -1119,7 +1107,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
       borderRight: isMobile ? 'none' : `1px solid ${COLORS.accent}`
     }}>
       {/* Section Filter */}
-      {!isPromptManagerSource && contributorSections.length > 1 && (
+      {contributorSections.length > 1 && (
         <div>
           <Title level={5} style={{ color: COLORS.text, marginBottom: 12, fontSize: 14, paddingLeft: 8 }}>
             <AppstoreFilled style={{ marginRight: 8 }} /> 分类筛选
@@ -1291,7 +1279,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
             );
           })}
           
-          {!isPromptManagerSource && data?.sections.length ? (
+          {data?.sections.length ? (
             <>
               <div style={{ height: 1, background: COLORS.secondary, margin: '8px 0', opacity: 0.5 }}></div>
               {data.sections.map(section => (
@@ -1600,7 +1588,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
                       onToggleReveal={toggleReveal}
                       onClick={openPreview}
                       onContributorClick={handleContributorClick}
-                      showSectionTag={!isPromptManagerSource}
+                      showSectionTag
                       timeLabel={formatPromptTime(prompt)}
                     />
                   ))}
@@ -1847,7 +1835,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
                             onToggleReveal={toggleReveal}
                             onClick={openPreview}
                             onContributorClick={() => {}} // No-op in profile
-                            showSectionTag={!isPromptManagerSource}
+                            showSectionTag
                             timeLabel={formatPromptTime(prompt)}
                           />
                         ))}
@@ -2024,7 +2012,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
               {/* Header */}
               <div style={{ marginBottom: 20 }}>
                 <Space style={{ marginBottom: 8 }} wrap>
-                  {!isPromptManagerSource && (
+                  {(
                     <Tag color="volcano" style={{ borderRadius: 8 }}>{previewPrompt.sectionTitle}</Tag>
                   )}
                   {favorites.includes(previewPrompt.id) && <Tag color="gold" icon={<StarFilled />} style={{ borderRadius: 8 }}>已收藏</Tag>}

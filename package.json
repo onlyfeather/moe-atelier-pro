@@ -1,5 +1,5 @@
 {
-  "name": "image-gen-frontend",
+  "name": "moe-atelier-pro",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -15,10 +15,16 @@
     "@dnd-kit/utilities": "^3.2.2",
     "antd": "^5.12.0",
     "axios": "^1.6.2",
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^9.4.5",
+    "connect-sqlite3": "^0.9.15",
     "express": "^4.19.2",
+    "express-session": "^1.17.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^9.0.1",
+    "sqlite3": "^5.1.7",
+    "svg-captcha": "^1.4.0",
     "uuid": "^9.0.1"
   },
   "devDependencies": {

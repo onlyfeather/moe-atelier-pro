@@ -1,22 +1,40 @@
 ﻿import express from 'express'
+import session from 'express-session'
+import connectSqlite3 from 'connect-sqlite3'
+import svgCaptcha from 'svg-captcha'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import {
   backendImagesDir,
   backendLogRequests,
-  backendPassword,
-  backendTasksDir,
   distDir,
   isProd,
   port,
   rootDir,
+  dbPath,
+  sessionSecret,
+  sessionTtlSeconds,
+  adminBootstrapUsername,
+  adminBootstrapPassword,
   DEFAULT_BACKEND_CONFIG,
   DEFAULT_CONCURRENCY,
   DEFAULT_GLOBAL_STATS,
   DEFAULT_TASK_STATS,
   pickFormatConfig,
 } from './server/config.mjs'
+import { getDb, safeJsonParse } from './server/db.mjs'
+import {
+  cleanupExpiredCaptcha,
+  createCaptcha,
+  createUser,
+  ensureBootstrapAdmin,
+  getUserByUsername,
+  listUsers,
+  updateLastLogin,
+  verifyCaptcha,
+  verifyPassword,
+} from './server/auth.mjs'
 import {
   logBackendOutbound,
   logBackendRequest,
@@ -36,7 +54,12 @@ import {
   saveTaskState,
 } from './server/storage.mjs'
 import { parseMarkdownImage, resolveImageFromResponse } from './server/imageParser.mjs'
-import { getMimeFromFilename, saveBackendImageBuffer, saveImageBuffer } from './server/imageStore.mjs'
+import {
+  getBackendImagePath,
+  getMimeFromFilename,
+  saveBackendImageBuffer,
+  saveImageBuffer,
+} from './server/imageStore.mjs'
 
 const readRequestBody = async (req) => {
   const chunks = []
@@ -49,7 +72,7 @@ const readRequestBody = async (req) => {
 const RETRY_DELAY_MS = 1000
 const ORPHAN_CLEANUP_DELAY_MS = 1500
 
-let orphanCleanupTimer = null
+let orphanCleanupTimer = {}
 
 const collectImageKeysFromTask = (taskState) => {
   const keys = new Set()
@@ -89,8 +112,6 @@ const getCollectionImageKey = (item) => {
   return key ? path.basename(String(key)) : ''
 }
 
-const getTaskFilePath = (taskId) => path.join(backendTasksDir, `${taskId}.json`)
-
 const collectImageKeysFromCollection = (items) => {
   const keys = new Set()
   if (!Array.isArray(items)) return keys
@@ -102,66 +123,89 @@ const collectImageKeysFromCollection = (items) => {
   return keys
 }
 
-const listTaskIds = async () => {
-  try {
-    const entries = await fs.promises.readdir(backendTasksDir, { withFileTypes: true })
-    return entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-      .map((entry) => path.basename(entry.name, '.json'))
-  } catch (err) {
-    if (err && err.code === 'ENOENT') return []
-    throw err
-  }
+const listTaskIds = (userId) => {
+  const db = getDb()
+  return db
+    .prepare('SELECT id FROM tasks WHERE user_id = ?')
+    .all(userId)
+    .map((row) => row.id)
 }
 
-const collectAllReferencedImageKeys = async () => {
+const collectAllReferencedImageKeys = async (userId) => {
+  const db = getDb()
   const keys = new Set()
-  const taskIds = await listTaskIds()
-  for (const taskId of taskIds) {
-    const taskState = await loadTaskState(taskId)
-    if (!taskState) continue
-    const taskKeys = collectImageKeysFromTask(taskState)
-    taskKeys.forEach((key) => keys.add(key))
-  }
-  const collectionItems = await loadBackendCollection()
-  const collectionKeys = collectImageKeysFromCollection(collectionItems)
-  collectionKeys.forEach((key) => keys.add(key))
+  const uploads = db
+    .prepare(
+      `SELECT u.local_key
+       FROM uploads u
+       JOIN tasks t ON t.id = u.task_id
+       WHERE t.user_id = ? AND u.local_key IS NOT NULL`,
+    )
+    .all(userId)
+  uploads.forEach((row) => {
+    if (row.local_key) keys.add(path.basename(String(row.local_key)))
+  })
+  const results = db
+    .prepare(
+      `SELECT r.local_key
+       FROM task_results r
+       JOIN tasks t ON t.id = r.task_id
+       WHERE t.user_id = ? AND r.local_key IS NOT NULL`,
+    )
+    .all(userId)
+  results.forEach((row) => {
+    if (row.local_key) keys.add(path.basename(String(row.local_key)))
+  })
+  const collections = db
+    .prepare(
+      `SELECT local_key FROM collections WHERE user_id = ? AND local_key IS NOT NULL`,
+    )
+    .all(userId)
+  collections.forEach((row) => {
+    if (row.local_key) keys.add(path.basename(String(row.local_key)))
+  })
   return keys
 }
 
-const cleanupUnusedImages = async (removedKeys = []) => {
+const cleanupUnusedImages = async (userId, removedKeys = []) => {
   if (!removedKeys.length) return
-  const referencedKeys = await collectAllReferencedImageKeys()
+  const referencedKeys = await collectAllReferencedImageKeys(userId)
   for (const key of removedKeys) {
     const safeKey = path.basename(String(key))
     if (!safeKey || referencedKeys.has(safeKey)) continue
-    const filePath = path.join(backendImagesDir, safeKey)
+    const filePath = getBackendImagePath(userId, safeKey)
+    if (!filePath) continue
     await fs.promises.unlink(filePath).catch(() => undefined)
   }
 }
 
-const cleanupOrphanedImages = async () => {
+const cleanupOrphanedImages = async (userId) => {
+  const userDir = path.join(backendImagesDir, String(userId))
   let entries = []
   try {
-    entries = await fs.promises.readdir(backendImagesDir, { withFileTypes: true })
+    entries = await fs.promises.readdir(userDir, { withFileTypes: true })
   } catch (err) {
     if (err && err.code === 'ENOENT') return
     throw err
   }
-  const referencedKeys = await collectAllReferencedImageKeys()
+  const referencedKeys = await collectAllReferencedImageKeys(userId)
   for (const entry of entries) {
     if (!entry.isFile()) continue
     if (referencedKeys.has(entry.name)) continue
-    const filePath = path.join(backendImagesDir, entry.name)
+    const filePath = path.join(userDir, entry.name)
     await fs.promises.unlink(filePath).catch(() => undefined)
   }
 }
 
-const scheduleOrphanCleanup = () => {
-  if (orphanCleanupTimer) return
-  orphanCleanupTimer = setTimeout(() => {
-    orphanCleanupTimer = null
-    cleanupOrphanedImages().catch((err) => {
+const scheduleOrphanCleanup = (userId) => {
+  if (!userId) return
+  if (orphanCleanupTimer?.[userId]) return
+  if (!orphanCleanupTimer) {
+    orphanCleanupTimer = {}
+  }
+  orphanCleanupTimer[userId] = setTimeout(() => {
+    orphanCleanupTimer[userId] = null
+    cleanupOrphanedImages(userId).catch((err) => {
       console.warn('清理后端图片缓存失败:', err)
     })
   }, ORPHAN_CLEANUP_DELAY_MS)
@@ -205,13 +249,13 @@ const mergeCollectionItems = (existing, incoming) => {
 
 let backendCollectionQueue = Promise.resolve()
 
-const appendBackendCollectionItems = (items) => {
+const appendBackendCollectionItems = (userId, items) => {
   if (!Array.isArray(items) || items.length === 0) return
   backendCollectionQueue = backendCollectionQueue
     .then(async () => {
-      const existing = await loadBackendCollection()
+      const existing = await loadBackendCollection(userId)
       const next = mergeCollectionItems(existing, items)
-      await saveBackendCollection(next)
+      await saveBackendCollection(userId, next)
     })
     .catch((err) => {
       console.warn('后端收藏写入失败:', err)
@@ -263,13 +307,13 @@ const updateStats = (stats, type, duration, count = 1) => {
   return next
 }
 
-const updateGlobalStats = async (type, duration, count) => {
-  const state = await loadBackendState()
+const updateGlobalStats = async (userId, type, duration, count) => {
+  const state = await loadBackendState(userId)
   const stats = updateStats(state.globalStats, type, duration, count)
-  await saveBackendState({ ...state, globalStats: stats })
+  await saveBackendState(userId, { ...state, globalStats: stats })
 }
 
-const buildMessagesForTask = async (taskState) => {
+const buildMessagesForTask = async (userId, taskState) => {
   const content = []
   if (taskState.prompt) {
     content.push({ type: 'text', text: taskState.prompt })
@@ -277,7 +321,8 @@ const buildMessagesForTask = async (taskState) => {
   const uploads = Array.isArray(taskState.uploads) ? taskState.uploads : []
   for (const upload of uploads) {
     if (!upload?.localKey) continue
-    const filePath = path.join(backendImagesDir, upload.localKey)
+    const filePath = getBackendImagePath(userId, upload.localKey)
+    if (!filePath) continue
     try {
       const buffer = await fs.promises.readFile(filePath)
       const mime = upload.type || getMimeFromFilename(upload.localKey)
@@ -573,29 +618,178 @@ const readResponseError = async (response) => {
   }
 }
 
-const requestImageUrl = async (config, messages, signal) => {
-  if (!config?.apiKey) {
+const normalizeGlobalConfig = (input = {}) => ({
+  apiKey: typeof input.apiKey === 'string' ? input.apiKey : '',
+  apiUrl: typeof input.apiUrl === 'string' ? input.apiUrl : DEFAULT_BACKEND_CONFIG.apiUrl,
+  apiFormat:
+    input.apiFormat === 'gemini' || input.apiFormat === 'vertex' ? input.apiFormat : 'openai',
+  apiVersion: typeof input.apiVersion === 'string' ? input.apiVersion : 'v1',
+  vertexProjectId:
+    typeof input.vertexProjectId === 'string'
+      ? input.vertexProjectId
+      : DEFAULT_BACKEND_CONFIG.vertexProjectId,
+  vertexLocation:
+    typeof input.vertexLocation === 'string'
+      ? input.vertexLocation
+      : DEFAULT_BACKEND_CONFIG.vertexLocation,
+  vertexPublisher:
+    typeof input.vertexPublisher === 'string'
+      ? input.vertexPublisher
+      : DEFAULT_BACKEND_CONFIG.vertexPublisher,
+  modelWhitelist: Array.isArray(input.modelWhitelist)
+    ? input.modelWhitelist.filter((item) => typeof item === 'string' && item.trim())
+    : [],
+})
+
+const getGlobalConfig = () => {
+  const db = getDb()
+  const row = db.prepare('SELECT * FROM global_config WHERE id = 1').get()
+  if (!row) {
+    return normalizeGlobalConfig({})
+  }
+  return normalizeGlobalConfig({
+    apiKey: row.api_key || '',
+    apiUrl: row.api_url || '',
+    apiFormat: row.api_format || '',
+    apiVersion: row.api_version || '',
+    vertexProjectId: row.vertex_project_id || '',
+    vertexLocation: row.vertex_location || '',
+    vertexPublisher: row.vertex_publisher || '',
+    modelWhitelist: safeJsonParse(row.model_whitelist_json, []),
+  })
+}
+
+const saveGlobalConfig = (payload) => {
+  const db = getDb()
+  const normalized = normalizeGlobalConfig(payload)
+  const now = Date.now()
+  const existing = db.prepare('SELECT id FROM global_config WHERE id = 1').get()
+  if (existing) {
+    db.prepare(
+      `UPDATE global_config
+       SET api_key = ?, api_url = ?, api_format = ?, api_version = ?, vertex_project_id = ?, vertex_location = ?, vertex_publisher = ?, model_whitelist_json = ?, updated_at = ?
+       WHERE id = 1`,
+    ).run(
+      normalized.apiKey,
+      normalized.apiUrl,
+      normalized.apiFormat,
+      normalized.apiVersion,
+      normalized.vertexProjectId,
+      normalized.vertexLocation,
+      normalized.vertexPublisher,
+      JSON.stringify(normalized.modelWhitelist),
+      now,
+    )
+  } else {
+    db.prepare(
+      `INSERT INTO global_config (id, api_key, api_url, api_format, api_version, vertex_project_id, vertex_location, vertex_publisher, model_whitelist_json, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      normalized.apiKey,
+      normalized.apiUrl,
+      normalized.apiFormat,
+      normalized.apiVersion,
+      normalized.vertexProjectId,
+      normalized.vertexLocation,
+      normalized.vertexPublisher,
+      JSON.stringify(normalized.modelWhitelist),
+      now,
+    )
+  }
+  return normalized
+}
+
+const buildModelCacheKey = (apiFormat, apiUrl, apiVersion) =>
+  `${apiFormat || ''}::${apiUrl || ''}::${apiVersion || ''}`
+
+const getModelCache = (apiFormat, apiUrl, apiVersion) => {
+  const db = getDb()
+  const key = buildModelCacheKey(apiFormat, apiUrl, apiVersion)
+  const row = db
+    .prepare('SELECT models_json, updated_at FROM model_cache WHERE id = ?')
+    .get(key)
+  if (!row) return null
+  return {
+    models: safeJsonParse(row.models_json, []),
+    updatedAt: row.updated_at,
+  }
+}
+
+const saveModelCache = (apiFormat, apiUrl, apiVersion, models) => {
+  const db = getDb()
+  const key = buildModelCacheKey(apiFormat, apiUrl, apiVersion)
+  const now = Date.now()
+  db.prepare(
+    `INSERT INTO model_cache (id, api_format, api_url, api_version, models_json, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       api_format = excluded.api_format,
+       api_url = excluded.api_url,
+       api_version = excluded.api_version,
+       models_json = excluded.models_json,
+       updated_at = excluded.updated_at`,
+  ).run(
+    key,
+    apiFormat || '',
+    apiUrl || '',
+    apiVersion || '',
+    JSON.stringify(models || []),
+    now,
+  )
+  return { models: models || [], updatedAt: now }
+}
+
+const requestImageUrl = async (config, globalConfig, messages, signal) => {
+  const apiKey = globalConfig?.apiKey || ''
+  if (!apiKey) {
     throw new Error('API Key 未配置')
   }
   if (!config?.model) {
     throw new Error('模型名称未配置')
   }
 
-  const apiFormat = config?.apiFormat || 'openai'
-  const apiUrl = resolveApiUrl(config?.apiUrl, apiFormat === 'vertex' ? 'vertex' : apiFormat)
+  const whitelist = Array.isArray(globalConfig?.modelWhitelist)
+    ? globalConfig.modelWhitelist
+    : []
+  if (whitelist.length && !whitelist.includes(String(config.model))) {
+    throw new Error('模型不在管理员白名单中')
+  }
+
+  const apiFormat = globalConfig?.apiFormat || 'openai'
+  const apiUrl = resolveApiUrl(
+    globalConfig?.apiUrl,
+    apiFormat === 'vertex' ? 'vertex' : apiFormat,
+  )
+  const versionFallback =
+    apiFormat === 'openai' ? 'v1' : apiFormat === 'vertex' ? 'v1beta1' : 'v1beta'
+  const apiVersion = resolveApiVersion(
+    apiUrl,
+    globalConfig?.apiVersion,
+    versionFallback,
+  )
+  const mergedConfig = {
+    ...config,
+    apiKey,
+    apiFormat,
+    apiUrl,
+    apiVersion,
+    vertexProjectId: globalConfig?.vertexProjectId,
+    vertexLocation: globalConfig?.vertexLocation,
+    vertexPublisher: globalConfig?.vertexPublisher,
+  }
 
   if (apiFormat !== 'openai') {
     const requestInfo = {
       url: '',
-      model: config.model,
-      stream: Boolean(config.stream),
+      model: mergedConfig.model,
+      stream: Boolean(mergedConfig.stream),
       format: apiFormat,
     }
     let response
     let data
     try {
       const contents = buildGeminiContentsFromMessages(messages)
-      const built = buildGeminiRequest(config)
+      const built = buildGeminiRequest(mergedConfig)
       requestInfo.url = built.url
       logBackendOutbound('api-request', requestInfo)
       response = await fetch(built.url, {
@@ -604,7 +798,7 @@ const requestImageUrl = async (config, messages, signal) => {
         body: JSON.stringify({ contents }),
         signal,
       })
-      data = config.stream ? await readGeminiStream(response) : await response.json()
+      data = mergedConfig.stream ? await readGeminiStream(response) : await response.json()
     } catch (err) {
       logBackendOutbound('api-request-error', {
         ...requestInfo,
@@ -623,6 +817,9 @@ const requestImageUrl = async (config, messages, signal) => {
       throw new Error(message)
     }
 
+    if (data?.error?.message) {
+      throw new Error(data.error.message)
+    }
     const imageUrl = resolveImageFromResponse(data)
     if (!imageUrl) {
       logBackendResponse('json-response', data)
@@ -634,23 +831,23 @@ const requestImageUrl = async (config, messages, signal) => {
   const basePath = baseInfo.origin
     ? `${baseInfo.origin}${baseInfo.segments.length ? `/${baseInfo.segments.join('/')}` : ''}`
     : String(apiUrl || '').replace(/\/+$/, '')
-  const version = resolveApiVersion(apiUrl, config.apiVersion, 'v1')
+  const version = resolveApiVersion(apiUrl, mergedConfig.apiVersion, 'v1')
   const hasVersion = Boolean(inferApiVersionFromUrl(apiUrl))
   const openAiBase = hasVersion ? basePath : `${basePath}/${version}`
   const chatUrl = openAiBase.endsWith('/chat/completions')
     ? openAiBase
     : `${openAiBase}/chat/completions`
   const headers = {
-    Authorization: `Bearer ${config.apiKey}`,
-    'x-api-key': config.apiKey,
+    Authorization: `Bearer ${apiKey}`,
+    'x-api-key': apiKey,
     'Content-Type': 'application/json',
     Connection: 'close',
   }
 
-  if (config.stream) {
+  if (mergedConfig.stream) {
     const requestInfo = {
       url: chatUrl,
-      model: config.model,
+      model: mergedConfig.model,
       stream: true,
     }
     logBackendOutbound('api-request', requestInfo)
@@ -659,7 +856,7 @@ const requestImageUrl = async (config, messages, signal) => {
       response = await fetch(requestInfo.url, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ model: config.model, messages, stream: true }),
+        body: JSON.stringify({ model: mergedConfig.model, messages, stream: true }),
         signal,
       })
     } catch (err) {
@@ -675,22 +872,94 @@ const requestImageUrl = async (config, messages, signal) => {
       logBackendResponse('stream-error', { status: response.status, message })
       throw new Error(message)
     }
+    const contentType = response.headers.get('content-type') || ''
+    if (!contentType.includes('text/event-stream')) {
+      const text = await response.text()
+      let imageUrl = null
+      if (text) {
+        try {
+          const parsed = JSON.parse(text)
+          imageUrl = resolveImageFromResponse(parsed)
+          if (!imageUrl) {
+            logBackendResponse('json-response', parsed)
+          }
+        } catch {
+          imageUrl = parseMarkdownImage(text)
+          if (!imageUrl) {
+            logBackendResponse('stream-response', text)
+          }
+        }
+      }
+      return imageUrl
+    }
+
     const reader = response.body?.getReader()
     const decoder = new TextDecoder()
     let generatedText = ''
     let pending = ''
+    let imageUrl = null
     const consumeLine = (line) => {
-      const cleaned = line.replace(/\r$/, '')
-      if (!cleaned.startsWith('data:')) return
-      const payload = cleaned.slice(5).trimStart()
-      if (!payload || payload === '[DONE]') return
+      const cleaned = line.replace(/\r$/, '').trim()
+      if (!cleaned) return
+      let payload = null
+      if (cleaned.startsWith('data:')) {
+        payload = cleaned.slice(5).trimStart()
+        if (!payload || payload === '[DONE]') return
+      } else if (cleaned.startsWith('{') || cleaned.startsWith('[')) {
+        payload = cleaned
+      } else {
+        return
+      }
       try {
         const json = JSON.parse(payload)
+        if (!imageUrl) {
+          const resolved = resolveImageFromResponse(json)
+          if (resolved) {
+            imageUrl = resolved
+            return
+          }
+        }
         const delta = json.choices?.[0]?.delta
-        if (delta?.content) generatedText += delta.content
-        if (delta?.reasoning_content) generatedText += delta.reasoning_content
+        if (delta?.content) {
+          if (typeof delta.content === 'string') {
+            generatedText += delta.content
+          } else if (Array.isArray(delta.content)) {
+            delta.content.forEach((part) => {
+              if (part?.type === 'text' && typeof part.text === 'string') {
+                generatedText += part.text
+              }
+              if (part?.type === 'image_url') {
+                const url = part?.image_url?.url || part?.image_url
+                if (typeof url === 'string' && !imageUrl) {
+                  imageUrl = parseMarkdownImage(url) || url
+                }
+              }
+            })
+          }
+        }
+        if (typeof delta?.reasoning_content === 'string') {
+          generatedText += delta.reasoning_content
+        }
+        const messageContent = json.choices?.[0]?.message?.content
+        if (typeof messageContent === 'string') {
+          generatedText += messageContent
+        } else if (Array.isArray(messageContent)) {
+          messageContent.forEach((part) => {
+            if (part?.type === 'text' && typeof part.text === 'string') {
+              generatedText += part.text
+            }
+            if (part?.type === 'image_url') {
+              const url = part?.image_url?.url || part?.image_url
+              if (typeof url === 'string' && !imageUrl) {
+                imageUrl = parseMarkdownImage(url) || url
+              }
+            }
+          })
+        }
       } catch {
-        // ignore chunk parse errors
+        if (!imageUrl) {
+          imageUrl = parseMarkdownImage(payload)
+        }
       }
     }
     if (reader) {
@@ -712,16 +981,17 @@ const requestImageUrl = async (config, messages, signal) => {
     if (pending) {
       consumeLine(pending)
     }
-    const imageUrl = parseMarkdownImage(generatedText)
-    if (!imageUrl) {
+    if (imageUrl) return imageUrl
+    const parsedUrl = parseMarkdownImage(generatedText)
+    if (!parsedUrl) {
       logBackendResponse('stream-response', generatedText)
     }
-    return imageUrl
+    return parsedUrl
   }
 
   const requestInfo = {
     url: chatUrl,
-    model: config.model,
+    model: mergedConfig.model,
     stream: false,
   }
   logBackendOutbound('api-request', requestInfo)
@@ -730,7 +1000,7 @@ const requestImageUrl = async (config, messages, signal) => {
     response = await fetch(requestInfo.url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ model: config.model, messages, stream: false }),
+      body: JSON.stringify({ model: mergedConfig.model, messages, stream: false }),
       signal,
     })
   } catch (err) {
@@ -786,30 +1056,31 @@ const downloadImageBuffer = async (imageUrl) => {
   return { buffer: Buffer.from(arrayBuffer), contentType }
 }
 
-const scheduleRetry = (taskId, subTaskId) => {
+const scheduleRetry = (userId, taskId, subTaskId) => {
   if (retryTimers.has(subTaskId)) return
   const timer = setTimeout(async () => {
     retryTimers.delete(subTaskId)
-    const taskState = await loadTaskState(taskId)
+    const taskState = await loadTaskState(userId, taskId)
     if (!taskState) return
     const resultIndex = taskState.results.findIndex((item) => item.id === subTaskId)
     if (resultIndex === -1) return
     const current = taskState.results[resultIndex]
     if (current?.autoRetry === false) return
     if (current.status !== 'loading') return
-    void runSubTask(taskId, subTaskId)
+    void runSubTask(userId, taskId, subTaskId)
   }, RETRY_DELAY_MS)
   retryTimers.set(subTaskId, timer)
 }
 
-const runSubTask = async (taskId, subTaskId, options = {}) => {
+const runSubTask = async (userId, taskId, subTaskId, options = {}) => {
   const countRequest = options.countRequest !== false
   if (activeControllers.has(subTaskId)) return
   clearRetryTimer(subTaskId)
   const controller = new AbortController()
   activeControllers.set(subTaskId, controller)
+  let debugContext = { userId, taskId, subTaskId }
 
-  const taskState = await loadTaskState(taskId)
+  const taskState = await loadTaskState(userId, taskId)
   if (!taskState) {
     activeControllers.delete(subTaskId)
     return
@@ -841,16 +1112,28 @@ const runSubTask = async (taskId, subTaskId, options = {}) => {
   if (countRequest) {
     taskState.stats = updateStats(taskState.stats, 'request')
   }
-  await saveTaskState(taskId, taskState)
+  await saveTaskState(userId, taskId, taskState)
   if (countRequest) {
-    await updateGlobalStats('request')
+    await updateGlobalStats(userId, 'request')
   }
 
   try {
-    const backendState = await loadBackendState()
+    const backendState = await loadBackendState(userId)
+    const globalConfig = getGlobalConfig()
+    debugContext = {
+      ...debugContext,
+      model: backendState?.config?.model || '',
+      apiFormat: globalConfig?.apiFormat || '',
+    }
     const shouldCollect = Boolean(backendState?.config?.enableCollection)
-    const messages = await buildMessagesForTask(taskState)
-    const imageUrl = await requestImageUrl(backendState.config, messages, controller.signal)
+    const messages = await buildMessagesForTask(userId, taskState)
+    const imageUrl = await requestImageUrl(
+      backendState.config,
+      globalConfig,
+      messages,
+      controller.signal,
+    )
+    debugContext = { ...debugContext, imageUrl }
     if (!imageUrl) {
       throw new Error('未在响应中找到图片数据')
     }
@@ -858,11 +1141,11 @@ const runSubTask = async (taskId, subTaskId, options = {}) => {
     if (!downloaded) {
       throw new Error('图片下载失败')
     }
-    const saved = await saveBackendImageBuffer(downloaded.buffer, downloaded.contentType)
+    const saved = await saveBackendImageBuffer(userId, downloaded.buffer, downloaded.contentType)
     const endTime = Date.now()
     const duration = endTime - startTime
 
-    const freshState = await loadTaskState(taskId)
+    const freshState = await loadTaskState(userId, taskId)
     if (!freshState) return
     const freshIndex = freshState.results.findIndex((item) => item.id === subTaskId)
     if (freshIndex === -1) return
@@ -878,8 +1161,8 @@ const runSubTask = async (taskId, subTaskId, options = {}) => {
       duration,
     }
     freshState.stats = updateStats(freshState.stats, 'success', duration)
-    await saveTaskState(taskId, freshState)
-    await updateGlobalStats('success', duration)
+    await saveTaskState(userId, taskId, freshState)
+    await updateGlobalStats(userId, 'success', duration)
     if (shouldCollect) {
       const items = []
       const timestamp = endTime
@@ -921,14 +1204,18 @@ const runSubTask = async (taskId, subTaskId, options = {}) => {
           })
         })
       }
-      appendBackendCollectionItems(items)
+      appendBackendCollectionItems(userId, items)
     }
   } catch (err) {
     if (controller.signal.aborted) {
       return
     }
+    console.error('backend subtask error:', {
+      ...debugContext,
+      error: describeFetchError(err) || err?.message || String(err),
+    })
     const errorMessage = err?.message || '未知错误'
-    const freshState = await loadTaskState(taskId)
+    const freshState = await loadTaskState(userId, taskId)
     if (!freshState) return
     const freshIndex = freshState.results.findIndex((item) => item.id === subTaskId)
     if (freshIndex === -1) return
@@ -942,8 +1229,8 @@ const runSubTask = async (taskId, subTaskId, options = {}) => {
         retryCount: (current.retryCount || 0) + 1,
         autoRetry: true,
       }
-      await saveTaskState(taskId, freshState)
-      scheduleRetry(taskId, subTaskId)
+      await saveTaskState(userId, taskId, freshState)
+      scheduleRetry(userId, taskId, subTaskId)
     } else {
       freshState.results[freshIndex] = {
         ...current,
@@ -952,15 +1239,15 @@ const runSubTask = async (taskId, subTaskId, options = {}) => {
         endTime: Date.now(),
         autoRetry: false,
       }
-      await saveTaskState(taskId, freshState)
+      await saveTaskState(userId, taskId, freshState)
     }
   } finally {
     activeControllers.delete(subTaskId)
   }
 }
 
-const startGeneration = async (taskId) => {
-  const taskState = (await loadTaskState(taskId)) || createDefaultTaskState()
+const startGeneration = async (userId, taskId) => {
+  const taskState = (await loadTaskState(userId, taskId)) || createDefaultTaskState()
   const previousState = {
     ...taskState,
     results: Array.isArray(taskState.results) ? [...taskState.results] : [],
@@ -981,19 +1268,19 @@ const startGeneration = async (taskId) => {
     savedLocal: false,
   }))
   taskState.stats = updateStats(taskState.stats, 'request', undefined, concurrency)
-  await saveTaskState(taskId, taskState)
-  await updateGlobalStats('request', undefined, concurrency)
+  await saveTaskState(userId, taskId, taskState)
+  await updateGlobalStats(userId, 'request', undefined, concurrency)
   const removedKeys = getRemovedImageKeys(previousState, taskState)
-  await cleanupUnusedImages(removedKeys)
-  scheduleOrphanCleanup()
+  await cleanupUnusedImages(userId, removedKeys)
+  scheduleOrphanCleanup(userId)
   taskState.results.forEach((result) => {
-    void runSubTask(taskId, result.id, { countRequest: false })
+    void runSubTask(userId, taskId, result.id, { countRequest: false })
   })
   return taskState
 }
 
-const retrySubTask = async (taskId, subTaskId) => {
-  const taskState = await loadTaskState(taskId)
+const retrySubTask = async (userId, taskId, subTaskId) => {
+  const taskState = await loadTaskState(userId, taskId)
   if (!taskState) return null
   const resultIndex = taskState.results.findIndex((item) => item.id === subTaskId)
   if (resultIndex === -1) return taskState
@@ -1014,19 +1301,19 @@ const retrySubTask = async (taskId, subTaskId) => {
     autoRetry: true,
     savedLocal: false,
   }
-  await saveTaskState(taskId, taskState)
+  await saveTaskState(userId, taskId, taskState)
   if (removedKey) {
-    await cleanupUnusedImages([removedKey])
+    await cleanupUnusedImages(userId, [removedKey])
   }
-  scheduleOrphanCleanup()
-  void runSubTask(taskId, subTaskId)
+  scheduleOrphanCleanup(userId)
+  void runSubTask(userId, taskId, subTaskId)
   return taskState
 }
 
 const normalizeStopMode = (mode) => (mode === 'abort' ? 'abort' : 'pause')
 
-const stopSubTask = async (taskId, subTaskId, mode = 'pause') => {
-  const taskState = await loadTaskState(taskId)
+const stopSubTask = async (userId, taskId, subTaskId, mode = 'pause') => {
+  const taskState = await loadTaskState(userId, taskId)
   if (!taskState) return null
   const resolvedMode = normalizeStopMode(mode)
   const shouldAbort = resolvedMode === 'abort'
@@ -1053,11 +1340,55 @@ const stopSubTask = async (taskId, subTaskId, mode = 'pause') => {
     }
   })
   const nextState = { ...taskState, results: nextResults }
-  await saveTaskState(taskId, nextState)
+  await saveTaskState(userId, taskId, nextState)
   return nextState
 }
 
+const SQLiteStore = connectSqlite3(session)
+const sessionDir = path.dirname(dbPath)
+const sessionDbName = path.basename(dbPath)
+fs.mkdirSync(sessionDir, { recursive: true })
+
 const app = express()
+
+if (isProd) {
+  app.set('trust proxy', 1)
+}
+
+app.use(
+  session({
+    name: 'moe_atelier_pro_sid',
+    store: new SQLiteStore({
+      db: sessionDbName,
+      dir: sessionDir,
+      ttl: sessionTtlSeconds,
+    }),
+    secret: sessionSecret || 'dev-session-secret',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      sameSite: isProd ? 'none' : 'lax',
+      secure: isProd,
+      maxAge: sessionTtlSeconds * 1000,
+    },
+  }),
+)
+
+if (!sessionSecret) {
+  console.warn('SESSION_SECRET 未配置，当前使用默认值，仅适用于本地开发')
+}
+
+app.use((req, _res, next) => {
+  if (req.session?.userId) {
+    req.user = {
+      id: req.session.userId,
+      role: req.session.userRole,
+      username: req.session.username,
+    }
+  }
+  next()
+})
 
 app.use(express.json({ limit: '50mb' }))
 if (backendLogRequests) {
@@ -1075,11 +1406,29 @@ if (backendLogRequests) {
   })
 }
 
-void cleanupOrphanedImages().catch((err) => {
-  console.warn('启动时清理后端图片缓存失败:', err)
+const requireAuth = (req, res, next) => {
+  if (!req.user?.id) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  next()
+}
+
+const requireAdmin = (req, res, next) => {
+  if (!req.user?.id || req.user.role !== 'admin') {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+  next()
+}
+
+void ensureBootstrapAdmin({
+  username: adminBootstrapUsername,
+  password: adminBootstrapPassword,
+}).catch((err) => {
+  console.warn('初始化管理员失败:', err)
 })
 
-const backendTokens = new Set()
 const PROMPT_MANAGER_URL = 'https://prompt.vioaki.xyz/api/gallery'
 
 app.get('/api/prompt-manager', async (_req, res) => {
@@ -1100,35 +1449,174 @@ app.get('/api/prompt-manager', async (_req, res) => {
   }
 })
 
-const requireBackendAuth = (req, res, next) => {
-  const headerToken = req.headers['x-backend-token']
-  const queryToken = req.query?.token
-  const token = Array.isArray(headerToken)
-    ? headerToken[0]
-    : (headerToken || queryToken)
-  if (!token || !backendTokens.has(token)) {
+app.get('/api/auth/captcha', (_req, res) => {
+  cleanupExpiredCaptcha()
+  const captcha = svgCaptcha.create({
+    size: 4,
+    noise: 2,
+    ignoreChars: '0o1i',
+    color: true,
+    background: '#FFF0F3',
+  })
+  const record = createCaptcha(captcha.text, 2 * 60 * 1000)
+  res.json({ id: record.id, svg: captcha.data })
+})
+
+app.post('/api/auth/login', async (req, res) => {
+  const { username, password, captchaId, captchaCode } = req.body || {}
+  if (!captchaId || !captchaCode || !verifyCaptcha(captchaId, captchaCode)) {
+    res.status(400).json({ error: '验证码错误或已过期' })
+    return
+  }
+  const user = getUserByUsername(username)
+  if (!user || user.disabled) {
+    res.status(401).json({ error: '账号不存在或已禁用' })
+    return
+  }
+  const ok = await verifyPassword(password || '', user.password_hash)
+  if (!ok) {
+    res.status(401).json({ error: '账号或密码错误' })
+    return
+  }
+  req.session.userId = user.id
+  req.session.userRole = user.role
+  req.session.username = user.username
+  updateLastLogin(user.id)
+  res.json({ user: { id: user.id, username: user.username, role: user.role } })
+})
+
+app.post('/api/auth/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.json({ ok: true })
+  })
+})
+
+app.get('/api/auth/me', (req, res) => {
+  if (!req.user?.id) {
     res.status(401).json({ error: 'Unauthorized' })
     return
   }
-  next()
-}
-
-app.post('/api/backend/auth', async (req, res) => {
-  if (!backendPassword) {
-    res.status(500).json({ error: 'BACKEND_PASSWORD not set' })
-    return
-  }
-  const { password } = req.body || {}
-  if (!password || password !== backendPassword) {
-    res.status(401).json({ error: 'Invalid password' })
-    return
-  }
-  const token = crypto.randomBytes(16).toString('hex')
-  backendTokens.add(token)
-  res.json({ token })
+  res.json({ user: { id: req.user.id, username: req.user.username, role: req.user.role } })
 })
 
-app.get('/api/backend/stream', requireBackendAuth, async (req, res) => {
+app.post('/api/admin/users', requireAdmin, async (req, res) => {
+  try {
+    const { username, password, role } = req.body || {}
+    const created = await createUser({
+      username,
+      password,
+      role: role === 'admin' ? 'admin' : 'user',
+    })
+    res.json(created)
+  } catch (err) {
+    res.status(400).json({ error: err?.message || 'Create Error' })
+  }
+})
+
+app.get('/api/admin/users', requireAdmin, (_req, res) => {
+  res.json(listUsers())
+})
+
+app.get('/api/admin/config', requireAdmin, (_req, res) => {
+  res.json(getGlobalConfig())
+})
+
+app.put('/api/admin/config', requireAdmin, (req, res) => {
+  try {
+    const saved = saveGlobalConfig(req.body || {})
+    res.json(saved)
+  } catch (err) {
+    res.status(400).json({ error: err?.message || 'Config Error' })
+  }
+})
+
+app.get('/api/admin/overview', requireAdmin, (_req, res) => {
+  const db = getDb()
+  const rows = db.prepare('SELECT global_stats_json FROM user_state').all()
+  const summary = { ...DEFAULT_GLOBAL_STATS }
+  rows.forEach((row) => {
+    const stats = safeJsonParse(row.global_stats_json, {})
+    summary.totalRequests += stats.totalRequests || 0
+    summary.successCount += stats.successCount || 0
+    summary.totalTime += stats.totalTime || 0
+    if (typeof stats.fastestTime === 'number' && stats.fastestTime > 0) {
+      summary.fastestTime =
+        summary.fastestTime === 0 ? stats.fastestTime : Math.min(summary.fastestTime, stats.fastestTime)
+    }
+    if (typeof stats.slowestTime === 'number' && stats.slowestTime > summary.slowestTime) {
+      summary.slowestTime = stats.slowestTime
+    }
+  })
+  const userCount = db.prepare('SELECT COUNT(1) as count FROM users').get()?.count || 0
+  const taskCount = db.prepare('SELECT COUNT(1) as count FROM tasks').get()?.count || 0
+  res.json({ users: userCount, tasks: taskCount, stats: summary })
+})
+
+app.get('/api/admin/tasks', requireAdmin, (req, res) => {
+  const db = getDb()
+  const userId = typeof req.query.userId === 'string' ? req.query.userId : ''
+  const params = userId ? [userId] : []
+  const where = userId ? 'WHERE t.user_id = ?' : ''
+  const rows = db
+    .prepare(
+      `SELECT t.id, t.user_id, t.prompt, t.updated_at, u.username
+       FROM tasks t
+       JOIN users u ON u.id = t.user_id
+       ${where}
+       ORDER BY t.updated_at DESC`,
+    )
+    .all(...params)
+  res.json(rows)
+})
+
+app.get('/api/admin/task/:id', requireAdmin, async (req, res) => {
+  const db = getDb()
+  const row = db
+    .prepare(
+      `SELECT t.id, t.user_id, u.username
+       FROM tasks t
+       JOIN users u ON u.id = t.user_id
+       WHERE t.id = ?`,
+    )
+    .get(req.params.id)
+  if (!row) {
+    res.status(404).json({ error: 'Not Found' })
+    return
+  }
+  const taskState = await loadTaskState(row.user_id, row.id)
+  if (!taskState) {
+    res.status(404).json({ error: 'Not Found' })
+    return
+  }
+  const adminResults = Array.isArray(taskState.results)
+    ? taskState.results.map((item) => ({
+        ...item,
+        sourceUrl: item.localKey
+          ? `/api/admin/image/${encodeURIComponent(row.user_id)}/${encodeURIComponent(item.localKey)}`
+          : item.sourceUrl,
+      }))
+    : []
+  res.json({
+    user: { id: row.user_id, username: row.username },
+    task: { ...taskState, results: adminResults },
+  })
+})
+
+app.get('/api/admin/image/:userId/:key', requireAdmin, async (req, res) => {
+  try {
+    const filePath = getBackendImagePath(req.params.userId, req.params.key)
+    if (!filePath || !fs.existsSync(filePath)) {
+      res.status(404).json({ error: 'Not Found' })
+      return
+    }
+    res.sendFile(filePath)
+  } catch (err) {
+    console.error('admin image error:', err)
+    res.status(500).json({ error: 'Read Error' })
+  }
+})
+
+app.get('/api/backend/stream', requireAuth, async (req, res) => {
   res.set({
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -1137,21 +1625,21 @@ app.get('/api/backend/stream', requireBackendAuth, async (req, res) => {
   })
   res.flushHeaders()
   res.write('retry: 2000\n\n')
-  addSseClient(res)
+  addSseClient(res, { userId: req.user.id, isAdmin: req.user.role === 'admin' })
   req.on('close', () => {
     removeSseClient(res)
   })
   try {
-    const state = await loadBackendState()
+    const state = await loadBackendState(req.user.id)
     sendSseEvent(res, 'state', state)
   } catch (err) {
     console.warn('初始化事件流状态失败:', err)
   }
 })
 
-app.get('/api/backend/state', requireBackendAuth, async (_req, res) => {
+app.get('/api/backend/state', requireAuth, async (req, res) => {
   try {
-    const state = await loadBackendState()
+    const state = await loadBackendState(req.user.id)
     res.json(state)
   } catch (err) {
     console.error('backend state error:', err)
@@ -1159,9 +1647,9 @@ app.get('/api/backend/state', requireBackendAuth, async (_req, res) => {
   }
 })
 
-app.patch('/api/backend/state', requireBackendAuth, async (req, res) => {
+app.patch('/api/backend/state', requireAuth, async (req, res) => {
   try {
-    const current = await loadBackendState()
+    const current = await loadBackendState(req.user.id)
     const next = { ...current }
     if (req.body?.configByFormat) {
       const incoming = req.body.configByFormat
@@ -1170,7 +1658,11 @@ app.patch('/api/backend/state', requireBackendAuth, async (req, res) => {
       }
     }
     if (req.body?.config) {
-      next.config = { ...DEFAULT_BACKEND_CONFIG, ...req.body.config }
+      const incomingConfig = { ...req.body.config }
+      if ('apiKey' in incomingConfig) {
+        delete incomingConfig.apiKey
+      }
+      next.config = { ...DEFAULT_BACKEND_CONFIG, ...incomingConfig }
       const apiFormat =
         next.config.apiFormat === 'gemini' || next.config.apiFormat === 'vertex'
           ? next.config.apiFormat
@@ -1187,7 +1679,7 @@ app.patch('/api/backend/state', requireBackendAuth, async (req, res) => {
     if (req.body?.globalStats) {
       next.globalStats = { ...DEFAULT_GLOBAL_STATS, ...req.body.globalStats }
     }
-    await saveBackendState(next)
+    await saveBackendState(req.user.id, next)
     res.json(next)
   } catch (err) {
     console.error('backend state write error:', err)
@@ -1195,9 +1687,200 @@ app.patch('/api/backend/state', requireBackendAuth, async (req, res) => {
   }
 })
 
-app.get('/api/backend/collection', requireBackendAuth, async (_req, res) => {
+app.post('/api/backend/models', requireAuth, async (req, res) => {
   try {
-    const items = await loadBackendCollection()
+    const payload = req.body || {}
+    const globalConfig = getGlobalConfig()
+    if (!globalConfig.apiKey) {
+      res.status(400).json({ error: 'API Key 未配置' })
+      return
+    }
+    const isAdmin = req.user?.role === 'admin' || req.session?.user?.role === 'admin'
+    const apiFormat =
+      isAdmin && payload.apiFormat ? payload.apiFormat : globalConfig.apiFormat || 'openai'
+    const apiUrl = resolveApiUrl(
+      isAdmin && payload.apiUrl ? payload.apiUrl : globalConfig.apiUrl,
+      apiFormat === 'vertex' ? 'vertex' : apiFormat,
+    )
+    const versionFallback =
+      apiFormat === 'openai' ? 'v1' : apiFormat === 'vertex' ? 'v1beta1' : 'v1beta'
+    const version = resolveApiVersion(
+      apiUrl,
+      isAdmin && payload.apiVersion ? payload.apiVersion : globalConfig.apiVersion,
+      versionFallback,
+    )
+    const baseInfo = normalizeApiBase(apiUrl)
+    const basePath = baseInfo.origin
+      ? `${baseInfo.origin}${baseInfo.segments.length ? `/${baseInfo.segments.join('/')}` : ''}`
+      : String(apiUrl || '').trim().replace(/\/+$/, '')
+
+    let url = ''
+    const headers = {}
+
+    if (apiFormat === 'openai') {
+      const hasVersion = Boolean(inferApiVersionFromUrl(apiUrl))
+      const openAiBase = hasVersion ? basePath : `${basePath}/${version}`
+      url = openAiBase.endsWith('/models') ? openAiBase : `${openAiBase}/models`
+      headers.Authorization = `Bearer ${globalConfig.apiKey}`
+    } else if (apiFormat === 'gemini') {
+      const segments = [...baseInfo.segments]
+      if (!inferApiVersionFromUrl(apiUrl)) {
+        const modelIndex = segments.indexOf('models')
+        if (modelIndex >= 0) {
+          segments.splice(modelIndex, 0, version)
+        } else {
+          segments.push(version)
+        }
+      }
+      const modelIndex = segments.indexOf('models')
+      if (modelIndex >= 0) {
+        segments.splice(modelIndex + 1)
+      } else {
+        segments.push('models')
+      }
+      const geminiBase = baseInfo.origin
+        ? `${baseInfo.origin}/${segments.join('/')}`
+        : `${segments.join('/')}`
+      const isOfficial = baseInfo.host === 'generativelanguage.googleapis.com'
+      if (isOfficial) {
+        url = `${geminiBase}?key=${encodeURIComponent(globalConfig.apiKey)}`
+      } else {
+        url = geminiBase
+        headers.Authorization = `Bearer ${globalConfig.apiKey}`
+      }
+    } else {
+      res.status(400).json({ error: 'Vertex 模型列表暂不支持自动获取' })
+      return
+    }
+
+    const response = await fetch(url, { headers })
+    if (!response.ok) {
+      const message = await readResponseError(response)
+      res.status(response.status).json({ error: message })
+      return
+    }
+    const data = await response.json()
+    const pickModelValue = (item) => {
+      if (typeof item === 'string') return item
+      if (!item || typeof item !== 'object') return ''
+      const keys = [
+        'id',
+        'name',
+        'model',
+        'model_name',
+        'modelId',
+        'model_id',
+        'value',
+        'label',
+        'slug',
+      ]
+      for (const key of keys) {
+        const value = item[key]
+        if (typeof value === 'string' && value.trim()) return value
+      }
+      return ''
+    }
+    const normalizeLabel = (value) => {
+      if (typeof value !== 'string') return ''
+      const trimmed = value.trim()
+      if (!trimmed) return ''
+      const parts = trimmed.split('/')
+      return parts[parts.length - 1] || trimmed
+    }
+    const pickArray = (...candidates) => {
+      for (const candidate of candidates) {
+        if (Array.isArray(candidate)) return candidate
+      }
+      return []
+    }
+
+    const list = pickArray(
+      data,
+      data?.data,
+      data?.data?.data,
+      data?.data?.models,
+      data?.models,
+      data?.models?.data,
+      data?.model_list,
+      data?.modelList,
+      data?.items,
+      data?.result,
+      data?.available_models,
+      data?.availableModels,
+      data?.response?.data,
+      data?.response?.models,
+    )
+
+    const modelOptions = list
+      .map((item) => {
+        const raw = pickModelValue(item)
+        if (!raw) return null
+        return { label: normalizeLabel(raw), value: raw }
+      })
+      .filter((item) => item && typeof item.value === 'string')
+      .sort((a, b) => a.value.localeCompare(b.value))
+
+    if (modelOptions.length) {
+      saveModelCache(apiFormat, apiUrl, version, modelOptions)
+    }
+
+    const ignoreWhitelist = Boolean(payload?.ignoreWhitelist) && isAdmin
+    const whitelist = Array.isArray(globalConfig.modelWhitelist) ? globalConfig.modelWhitelist : []
+    const filtered =
+      !ignoreWhitelist && whitelist.length
+        ? modelOptions.filter((item) => whitelist.includes(item.value))
+        : modelOptions
+
+    if (!filtered.length) {
+      const cached = getModelCache(apiFormat, apiUrl, version)
+      if (cached?.models?.length) {
+        const cachedFiltered =
+          !ignoreWhitelist && whitelist.length
+            ? cached.models.filter((item) => whitelist.includes(item.value))
+            : cached.models
+        res.json(cachedFiltered)
+        return
+      }
+    }
+
+    res.json(filtered)
+  } catch (err) {
+    const payload = req.body || {}
+    const globalConfig = getGlobalConfig()
+    const isAdmin = req.session?.user?.role === 'admin'
+    const apiFormat =
+      isAdmin && payload.apiFormat ? payload.apiFormat : globalConfig.apiFormat || 'openai'
+    const apiUrl = resolveApiUrl(
+      isAdmin && payload.apiUrl ? payload.apiUrl : globalConfig.apiUrl,
+      apiFormat === 'vertex' ? 'vertex' : apiFormat,
+    )
+    const versionFallback =
+      apiFormat === 'openai' ? 'v1' : apiFormat === 'vertex' ? 'v1beta1' : 'v1beta'
+    const version = resolveApiVersion(
+      apiUrl,
+      isAdmin && payload.apiVersion ? payload.apiVersion : globalConfig.apiVersion,
+      versionFallback,
+    )
+    const cached = getModelCache(apiFormat, apiUrl, version)
+    if (cached?.models?.length) {
+      const isAdmin = req.user?.role === 'admin' || req.session?.user?.role === 'admin'
+      const ignoreWhitelist = Boolean(payload?.ignoreWhitelist) && isAdmin
+      const whitelist = Array.isArray(globalConfig.modelWhitelist) ? globalConfig.modelWhitelist : []
+      const cachedFiltered =
+        !ignoreWhitelist && whitelist.length
+          ? cached.models.filter((item) => whitelist.includes(item.value))
+          : cached.models
+      res.json(cachedFiltered)
+      return
+    }
+    console.error('backend models error:', err)
+    res.status(500).json({ error: 'Model Error' })
+  }
+})
+
+app.get('/api/backend/collection', requireAuth, async (req, res) => {
+  try {
+    const items = await loadBackendCollection(req.user.id)
     res.json(items)
   } catch (err) {
     console.error('backend collection read error:', err)
@@ -1205,19 +1888,19 @@ app.get('/api/backend/collection', requireBackendAuth, async (_req, res) => {
   }
 })
 
-app.put('/api/backend/collection', requireBackendAuth, async (req, res) => {
+app.put('/api/backend/collection', requireAuth, async (req, res) => {
   try {
-    const previous = await loadBackendCollection()
+    const previous = await loadBackendCollection(req.user.id)
     const items = normalizeCollectionPayloadForSave(req.body)
-    await saveBackendCollection(items)
+    await saveBackendCollection(req.user.id, items)
     const prevKeys = collectImageKeysFromCollection(previous)
     const nextKeys = collectImageKeysFromCollection(items)
     const removedKeys = []
     for (const key of prevKeys) {
       if (!nextKeys.has(key)) removedKeys.push(key)
     }
-    await cleanupUnusedImages(removedKeys)
-    scheduleOrphanCleanup()
+    await cleanupUnusedImages(req.user.id, removedKeys)
+    scheduleOrphanCleanup(req.user.id)
     res.json(items)
   } catch (err) {
     console.error('backend collection write error:', err)
@@ -1225,15 +1908,15 @@ app.put('/api/backend/collection', requireBackendAuth, async (req, res) => {
   }
 })
 
-app.get('/api/backend/task/:id', requireBackendAuth, async (req, res) => {
+app.get('/api/backend/task/:id', requireAuth, async (req, res) => {
   try {
     const taskId = req.params.id
-    const taskState = await loadTaskState(taskId)
+    const taskState = await loadTaskState(req.user.id, taskId)
     if (!taskState) {
-      const backendState = await loadBackendState()
+      const backendState = await loadBackendState(req.user.id)
       if (backendState.tasksOrder.includes(taskId)) {
         const next = createDefaultTaskState()
-        await saveTaskState(taskId, next)
+        await saveTaskState(req.user.id, taskId, next)
         res.json(next)
         return
       }
@@ -1247,10 +1930,10 @@ app.get('/api/backend/task/:id', requireBackendAuth, async (req, res) => {
   }
 })
 
-app.put('/api/backend/task/:id', requireBackendAuth, async (req, res) => {
+app.put('/api/backend/task/:id', requireAuth, async (req, res) => {
   try {
     const payload = req.body || {}
-    const previous = await loadTaskState(req.params.id)
+    const previous = await loadTaskState(req.user.id, req.params.id)
     const next = {
       ...createDefaultTaskState(),
       ...payload,
@@ -1259,12 +1942,12 @@ app.put('/api/backend/task/:id', requireBackendAuth, async (req, res) => {
       results: Array.isArray(payload?.results) ? payload.results : [],
       uploads: Array.isArray(payload?.uploads) ? payload.uploads : [],
     }
-    await saveTaskState(req.params.id, next)
+    await saveTaskState(req.user.id, req.params.id, next)
     if (previous) {
       const removedKeys = getRemovedImageKeys(previous, next)
-      await cleanupUnusedImages(removedKeys)
+      await cleanupUnusedImages(req.user.id, removedKeys)
     }
-    scheduleOrphanCleanup()
+    scheduleOrphanCleanup(req.user.id)
     res.json(next)
   } catch (err) {
     console.error('backend task write error:', err)
@@ -1272,10 +1955,11 @@ app.put('/api/backend/task/:id', requireBackendAuth, async (req, res) => {
   }
 })
 
-app.patch('/api/backend/task/:id', requireBackendAuth, async (req, res) => {
+app.patch('/api/backend/task/:id', requireAuth, async (req, res) => {
   try {
     const payload = req.body || {}
-    const current = (await loadTaskState(req.params.id)) || createDefaultTaskState()
+    const current =
+      (await loadTaskState(req.user.id, req.params.id)) || createDefaultTaskState()
     const next = {
       ...current,
       prompt: typeof payload.prompt === 'string' ? payload.prompt : current.prompt,
@@ -1283,10 +1967,10 @@ app.patch('/api/backend/task/:id', requireBackendAuth, async (req, res) => {
       enableSound: typeof payload.enableSound === 'boolean' ? payload.enableSound : current.enableSound,
       uploads: Array.isArray(payload?.uploads) ? payload.uploads : current.uploads,
     }
-    await saveTaskState(req.params.id, next)
+    await saveTaskState(req.user.id, req.params.id, next)
     const removedKeys = getRemovedImageKeys(current, next)
-    await cleanupUnusedImages(removedKeys)
-    scheduleOrphanCleanup()
+    await cleanupUnusedImages(req.user.id, removedKeys)
+    scheduleOrphanCleanup(req.user.id)
     res.json(next)
   } catch (err) {
     console.error('backend task patch error:', err)
@@ -1294,9 +1978,9 @@ app.patch('/api/backend/task/:id', requireBackendAuth, async (req, res) => {
   }
 })
 
-app.delete('/api/backend/task/:id', requireBackendAuth, async (req, res) => {
+app.delete('/api/backend/task/:id', requireAuth, async (req, res) => {
   try {
-    const existing = await loadTaskState(req.params.id)
+    const existing = await loadTaskState(req.user.id, req.params.id)
     const removedKeys = existing ? Array.from(collectImageKeysFromTask(existing)) : []
     if (existing?.results) {
       existing.results.forEach((result) => {
@@ -1308,15 +1992,18 @@ app.delete('/api/backend/task/:id', requireBackendAuth, async (req, res) => {
         clearRetryTimer(result.id)
       })
     }
-    await fs.promises.unlink(getTaskFilePath(req.params.id)).catch(() => undefined)
-    const state = await loadBackendState()
+    const db = getDb()
+    db.prepare('DELETE FROM task_results WHERE task_id = ?').run(req.params.id)
+    db.prepare('DELETE FROM uploads WHERE task_id = ?').run(req.params.id)
+    db.prepare('DELETE FROM tasks WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id)
+    const state = await loadBackendState(req.user.id)
     const next = {
       ...state,
       tasksOrder: state.tasksOrder.filter((id) => id !== req.params.id),
     }
-    await saveBackendState(next)
-    await cleanupUnusedImages(removedKeys)
-    await cleanupOrphanedImages()
+    await saveBackendState(req.user.id, next)
+    await cleanupUnusedImages(req.user.id, removedKeys)
+    await cleanupOrphanedImages(req.user.id)
     res.json({ ok: true })
   } catch (err) {
     console.error('backend task delete error:', err)
@@ -1324,9 +2011,9 @@ app.delete('/api/backend/task/:id', requireBackendAuth, async (req, res) => {
   }
 })
 
-app.post('/api/backend/task/:id/generate', requireBackendAuth, async (req, res) => {
+app.post('/api/backend/task/:id/generate', requireAuth, async (req, res) => {
   try {
-    const state = await startGeneration(req.params.id)
+    const state = await startGeneration(req.user.id, req.params.id)
     res.json(state)
   } catch (err) {
     console.error('backend generate error:', err)
@@ -1334,14 +2021,14 @@ app.post('/api/backend/task/:id/generate', requireBackendAuth, async (req, res) 
   }
 })
 
-app.post('/api/backend/task/:id/retry', requireBackendAuth, async (req, res) => {
+app.post('/api/backend/task/:id/retry', requireAuth, async (req, res) => {
   try {
     const { subTaskId } = req.body || {}
     if (!subTaskId) {
       res.status(400).json({ error: 'Missing subTaskId' })
       return
     }
-    const state = await retrySubTask(req.params.id, subTaskId)
+    const state = await retrySubTask(req.user.id, req.params.id, subTaskId)
     if (!state) {
       res.status(404).json({ error: 'Not Found' })
       return
@@ -1353,10 +2040,10 @@ app.post('/api/backend/task/:id/retry', requireBackendAuth, async (req, res) => 
   }
 })
 
-app.post('/api/backend/task/:id/stop', requireBackendAuth, async (req, res) => {
+app.post('/api/backend/task/:id/stop', requireAuth, async (req, res) => {
   try {
     const { subTaskId, mode } = req.body || {}
-    const state = await stopSubTask(req.params.id, subTaskId, mode)
+    const state = await stopSubTask(req.user.id, req.params.id, subTaskId, mode)
     if (!state) {
       res.status(404).json({ error: 'Not Found' })
       return
@@ -1370,7 +2057,7 @@ app.post('/api/backend/task/:id/stop', requireBackendAuth, async (req, res) => {
 
 app.post(
   '/api/backend/upload',
-  requireBackendAuth,
+  requireAuth,
   express.raw({ type: '*/*', limit: '50mb' }),
   async (req, res) => {
     try {
@@ -1380,7 +2067,7 @@ app.post(
         return
       }
       const contentType = req.headers['content-type'] || 'application/octet-stream'
-      const result = await saveBackendImageBuffer(buffer, contentType)
+      const result = await saveBackendImageBuffer(req.user.id, buffer, contentType)
       res.json({
         key: result.fileName,
         url: `/api/backend/image/${encodeURIComponent(result.fileName)}`,
@@ -1392,11 +2079,10 @@ app.post(
   },
 )
 
-app.get('/api/backend/image/:key', requireBackendAuth, async (req, res) => {
+app.get('/api/backend/image/:key', requireAuth, async (req, res) => {
   try {
-    const safeName = path.basename(req.params.key)
-    const filePath = path.join(backendImagesDir, safeName)
-    if (!fs.existsSync(filePath)) {
+    const filePath = getBackendImagePath(req.user.id, req.params.key)
+    if (!filePath || !fs.existsSync(filePath)) {
       res.status(404).json({ error: 'Not Found' })
       return
     }
@@ -1407,14 +2093,13 @@ app.get('/api/backend/image/:key', requireBackendAuth, async (req, res) => {
   }
 })
 
-app.delete('/api/backend/image/:key', requireBackendAuth, async (req, res) => {
+app.delete('/api/backend/image/:key', requireAuth, async (req, res) => {
   try {
-    const safeName = path.basename(req.params.key)
-    if (!safeName) {
+    const filePath = getBackendImagePath(req.user.id, req.params.key)
+    if (!filePath) {
       res.status(400).json({ error: 'Missing Key' })
       return
     }
-    const filePath = path.join(backendImagesDir, safeName)
     await fs.promises.unlink(filePath).catch(() => undefined)
     res.json({ ok: true })
   } catch (err) {
@@ -1423,14 +2108,14 @@ app.delete('/api/backend/image/:key', requireBackendAuth, async (req, res) => {
   }
 })
 
-app.post('/api/backend/images/cleanup', requireBackendAuth, async (req, res) => {
+app.post('/api/backend/images/cleanup', requireAuth, async (req, res) => {
   try {
     const keys = Array.isArray(req.body?.keys) ? req.body.keys : []
     const normalized = keys
       .map((key) => path.basename(String(key)))
       .filter((key) => key)
-    await cleanupUnusedImages(normalized)
-    scheduleOrphanCleanup()
+    await cleanupUnusedImages(req.user.id, normalized)
+    scheduleOrphanCleanup(req.user.id)
     res.json({ ok: true })
   } catch (err) {
     console.error('backend image cleanup error:', err)

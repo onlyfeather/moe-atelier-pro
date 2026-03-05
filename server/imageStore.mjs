@@ -42,20 +42,28 @@ export const saveImageBuffer = async (buffer, contentType) => {
   return { saved: true, exists: false, fileName }
 }
 
-export const saveBackendImageBuffer = async (buffer, contentType) => {
+export const saveBackendImageBuffer = async (userId, buffer, contentType) => {
   const fileHash = crypto.createHash('sha256').update(buffer).digest('hex')
   const extension = getExtensionFromType(contentType)
   const fileName = `${fileHash}${extension}`
-  const filePath = path.join(backendImagesDir, fileName)
+  const userDir = path.join(backendImagesDir, String(userId))
+  const filePath = path.join(userDir, fileName)
 
-  await fs.promises.mkdir(backendImagesDir, { recursive: true })
-  const matched = await findExistingFile(backendImagesDir, fileHash)
+  await fs.promises.mkdir(userDir, { recursive: true })
+  const matched = await findExistingFile(userDir, fileHash)
   if (matched) {
     return { saved: false, exists: true, fileName: matched }
   }
 
   await fs.promises.writeFile(filePath, buffer)
   return { saved: true, exists: false, fileName }
+}
+
+export const getBackendImagePath = (userId, fileName) => {
+  const safeName = path.basename(String(fileName || ''))
+  const safeUser = path.basename(String(userId || ''))
+  if (!safeName || !safeUser) return ''
+  return path.join(backendImagesDir, safeUser, safeName)
 }
 
 export const getMimeFromFilename = (fileName = '') => {

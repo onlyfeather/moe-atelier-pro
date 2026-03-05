@@ -37,7 +37,7 @@ export const backendTasksDir = path.join(serverDataDir, 'tasks')
 export const backendImagesDir = path.join(serverDataDir, 'images')
 export const backendStatePath = path.join(serverDataDir, 'state.json')
 export const backendCollectionPath = path.join(serverDataDir, 'collection.json')
-export const backendPassword = process.env.BACKEND_PASSWORD || ''
+export const dbPath = path.join(serverDataDir, 'app.db')
 export const backendLogResponse = ['1', 'true', 'yes'].includes(
   String(process.env.BACKEND_LOG_RESPONSE || '').toLowerCase(),
 )
@@ -47,6 +47,11 @@ export const backendLogRequests = ['1', 'true', 'yes'].includes(
 export const backendLogOutbound = ['1', 'true', 'yes'].includes(
   String(process.env.BACKEND_LOG_OUTBOUND || '').toLowerCase(),
 )
+
+export const sessionSecret = process.env.SESSION_SECRET || ''
+export const sessionTtlSeconds = Number(process.env.SESSION_TTL || 60 * 60 * 24 * 7)
+export const adminBootstrapUsername = process.env.ADMIN_USERNAME || ''
+export const adminBootstrapPassword = process.env.ADMIN_PASSWORD || ''
 
 export const DEFAULT_BACKEND_CONFIG = {
   apiUrl: 'https://api.openai.com/v1',

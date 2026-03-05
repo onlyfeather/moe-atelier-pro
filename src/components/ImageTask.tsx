@@ -43,7 +43,6 @@ import {
   cleanupBackendImages,
   fetchBackendTask,
   generateBackendTask,
-  getBackendToken,
   patchBackendTask,
   retryBackendSubTask,
   stopBackendSubTask,
@@ -195,14 +194,7 @@ const ImageTask: React.FC<ImageTaskProps> = ({ id, storageKey, config, backendMo
   } = promptGuard;
   const { markSynced: markTaskSynced } = taskSync;
 
-  const withBackendToken = (url: string) => {
-    const cleaned = stripBackendToken(url);
-    const token = getBackendToken();
-    if (!token) return cleaned;
-    return cleaned.includes('?')
-      ? `${cleaned}&token=${encodeURIComponent(token)}`
-      : `${cleaned}?token=${encodeURIComponent(token)}`;
-  };
+  const withBackendToken = (url: string) => stripBackendToken(url);
 
   const resolveBackendDisplayUrl = (localKey?: string, sourceUrl?: string) => {
     if (localKey) {
@@ -1343,7 +1335,7 @@ const ImageTask: React.FC<ImageTaskProps> = ({ id, storageKey, config, backendMo
   });
 
   const handleGenerate = async () => {
-    if (!config.apiKey) {
+    if (!backendMode && !config.apiKey) {
       message.error('请先配置 API Key');
       return;
     }

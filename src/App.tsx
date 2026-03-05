@@ -10,7 +10,8 @@ import {
   AppstoreFilled,
   ExperimentFilled,
   ReloadOutlined,
-  DeleteFilled
+  DeleteFilled,
+  LogoutOutlined
 } from '@ant-design/icons';
 import { v4 as uuidv4 } from 'uuid';
 import PromptDrawer from './components/PromptDrawer';
@@ -52,19 +53,14 @@ import { safeStorageSet } from './utils/storage';
 import { calculateSuccessRate, formatDuration } from './utils/stats';
 import { TASK_STATE_VERSION, saveTaskState, DEFAULT_TASK_STATS } from './components/imageTaskState';
 import {
-  authBackend,
-  clearBackendToken,
   deleteBackendTask,
   fetchBackendCollection,
+  fetchBackendModels,
   fetchBackendState,
-  getBackendMode,
-  getBackendToken,
   buildBackendStreamUrl,
   patchBackendState,
   putBackendTask,
   putBackendCollection,
-  setBackendMode as persistBackendMode,
-  setBackendToken,
   type BackendState,
 } from './utils/backendApi';
 
@@ -80,6 +76,10 @@ const EMPTY_GLOBAL_STATS: GlobalStats = {
 const API_FORMATS: ApiFormat[] = ['openai', 'gemini', 'vertex'];
 
 type FormatConfigMap = Record<ApiFormat, FormatConfig>;
+
+interface AppProps {
+  onLogout?: () => void;
+}
 
 const buildBackendFormatConfigs = (
   value: unknown,
@@ -107,29 +107,21 @@ const buildBackendFormatConfigs = (
   return next;
 };
 
-function App() {
-  const initialBackendMode = getBackendMode() && Boolean(getBackendToken());
+function App({ onLogout }: AppProps) {
+  const backendMode = true;
   const [config, setConfig] = useState<AppConfig>(() => loadConfig());
-  const [tasks, setTasks] = useState<TaskConfig[]>(() =>
-    initialBackendMode ? [] : loadTasks(),
-  );
+  const [tasks, setTasks] = useState<TaskConfig[]>(() => []);
   const [globalStats, setGlobalStats] = useState<GlobalStats>(() => loadGlobalStats());
   const [configVisible, setConfigVisible] = useState(false);
   const [collectionVisible, setCollectionVisible] = useState(false);
-  const [collectedItems, setCollectedItems] = useState<CollectionItem[]>(() =>
-    initialBackendMode ? [] : loadCollectionItems(),
-  );
+  const [collectedItems, setCollectedItems] = useState<CollectionItem[]>(() => []);
   const [collectionRevision, setCollectionRevision] = useState(0);
   const [promptDrawerVisible, setPromptDrawerVisible] = useState(false);
   const [models, setModels] = useState<{label: string, value: string}[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [form] = Form.useForm();
-  const [backendMode, setBackendModeState] = useState<boolean>(() => initialBackendMode);
-  const [backendAuthPending, setBackendAuthPending] = useState(false);
-  const [backendPassword, setBackendPassword] = useState('');
-  const [backendAuthLoading, setBackendAuthLoading] = useState(false);
   const [backendSyncing, setBackendSyncing] = useState(false);
-  const backendModeRef = useRef(initialBackendMode);
+  const backendModeRef = useRef(true);
   const configRef = useRef(config);
   const configVisibleRef = useRef(configVisible);
   const backendFormatConfigsRef = useRef<FormatConfigMap>(
@@ -265,11 +257,7 @@ function App() {
     } catch (err: any) {
       console.error(err);
       message.error('后端模式初始化失败，请检查密码或服务状态');
-      clearBackendToken();
-      persistBackendMode(false);
       localHydratingRef.current = true;
-      backendModeRef.current = false;
-      setBackendModeState(false);
       const localConfig = loadConfig();
       setConfig(localConfig);
       setTasks(loadTasks());
@@ -278,52 +266,6 @@ function App() {
       setBackendSyncing(false);
     }
   }, [applyBackendState, config]);
-
-  const handleBackendEnable = () => {
-    setBackendPassword('');
-    setBackendAuthPending(true);
-  };
-
-  const handleBackendDisable = () => {
-    setBackendAuthPending(false);
-    setBackendPassword('');
-    clearBackendToken();
-    persistBackendMode(false);
-    localHydratingRef.current = true;
-    backendModeRef.current = false;
-    setBackendModeState(false);
-    const localConfig = loadConfig();
-    setConfig(localConfig);
-    setTasks(loadTasks());
-    setGlobalStats(loadGlobalStats());
-  };
-
-  const handleBackendAuthConfirm = async () => {
-    if (!backendPassword) {
-      message.warning('请输入后端密码');
-      return;
-    }
-    setBackendAuthLoading(true);
-    try {
-      const token = await authBackend(backendPassword);
-      setBackendToken(token);
-      persistBackendMode(true);
-      setBackendModeState(true);
-      backendModeRef.current = true;
-      setBackendAuthPending(false);
-      setBackendPassword('');
-    } catch (err: any) {
-      console.error(err);
-      message.error('后端密码错误或服务器不可用');
-    } finally {
-      setBackendAuthLoading(false);
-    }
-  };
-
-  const handleBackendAuthCancel = () => {
-    setBackendAuthPending(false);
-    setBackendPassword('');
-  };
 
   React.useEffect(() => {
     backendModeRef.current = backendMode;
@@ -535,106 +477,11 @@ function App() {
   }, [backendMode, applyBackendState]);
 
   const fetchModels = async () => {
-    const currentConfig = form.getFieldsValue();
-    if (!currentConfig.apiKey) {
-      message.warning('请先填写 API 密钥');
-      return;
-    }
-
     setLoadingModels(true);
     try {
-      const apiFormat = currentConfig.apiFormat || 'openai';
-      const apiUrl = resolveApiUrl(currentConfig.apiUrl, apiFormat);
-      const versionFallback =
-        apiFormat === 'openai' ? 'v1' : apiFormat === 'vertex' ? 'v1beta1' : 'v1beta';
-      const version = resolveApiVersion(
-        apiUrl,
-        currentConfig.apiVersion,
-        versionFallback,
-      );
-      const baseInfo = normalizeApiBase(apiUrl);
-      const basePath = baseInfo.origin
-        ? `${baseInfo.origin}${baseInfo.segments.length ? `/${baseInfo.segments.join('/')}` : ''}`
-        : apiUrl.replace(/\/+$/, '');
-
-      let url = '';
-      const headers: Record<string, string> = {};
-
-      if (apiFormat === 'openai') {
-        const hasVersion = Boolean(inferApiVersionFromUrl(apiUrl));
-        const openAiBase = hasVersion ? basePath : `${basePath}/${version}`;
-        url = openAiBase.endsWith('/models') ? openAiBase : `${openAiBase}/models`;
-        headers.Authorization = `Bearer ${currentConfig.apiKey}`;
-      } else if (apiFormat === 'gemini') {
-        const segments = [...baseInfo.segments];
-        if (!inferApiVersionFromUrl(apiUrl)) {
-          const modelIndex = segments.indexOf('models');
-          if (modelIndex >= 0) {
-            segments.splice(modelIndex, 0, version);
-          } else {
-            segments.push(version);
-          }
-        }
-        const modelIndex = segments.indexOf('models');
-        if (modelIndex >= 0) {
-          segments.splice(modelIndex + 1);
-        } else {
-          segments.push('models');
-        }
-        const geminiBase = baseInfo.origin
-          ? `${baseInfo.origin}/${segments.join('/')}`
-          : `${segments.join('/')}`;
-        const isOfficial = baseInfo.host === 'generativelanguage.googleapis.com';
-        if (isOfficial) {
-          url = `${geminiBase}?key=${encodeURIComponent(currentConfig.apiKey)}`;
-        } else {
-          url = geminiBase;
-          headers.Authorization = `Bearer ${currentConfig.apiKey}`;
-        }
-      } else {
-        message.warning('Vertex 模型列表暂不支持自动获取');
-        return;
-      }
-
-      const res = await fetch(url, { headers });
-      
-      if (!res.ok) {
-        throw new Error(`HTTP error! status: ${res.status}`);
-      }
-
-      const data = await res.json();
-      if (apiFormat === 'openai') {
-        const list = Array.isArray(data.data) ? data.data : Array.isArray(data.models) ? data.models : [];
-        if (list.length === 0) {
-          throw new Error('返回数据格式不正确');
-        }
-        const modelOptions = list
-          .map((m: any) => ({ label: m.id || m.name, value: m.id || m.name }))
-          .filter((item: any) => typeof item.value === 'string')
-          .sort((a: any, b: any) => a.value.localeCompare(b.value));
-        setModels(modelOptions);
-        message.success(`成功获取 ${modelOptions.length} 个模型`);
-      } else {
-        const list = Array.isArray(data.models)
-          ? data.models
-          : Array.isArray(data.data)
-            ? data.data
-            : [];
-        if (list.length === 0) {
-          throw new Error('返回数据格式不正确');
-        }
-        const modelOptions = list
-          .map((m: any) => {
-            const rawName =
-              typeof m?.name === 'string' ? m.name : typeof m?.id === 'string' ? m.id : '';
-            const name = rawName.replace(/^models\//, '');
-            return name ? { label: name, value: name } : null;
-          })
-          .filter((item: any) => item && item.value)
-          .sort((a: any, b: any) => a.value.localeCompare(b.value));
-        setModels(modelOptions);
-        message.success(`成功获取 ${modelOptions.length} 个模型`);
-      }
+      const modelOptions = await fetchBackendModels({});
+      setModels(modelOptions);
+      message.success(`成功获取 ${modelOptions.length} 个模型`);
     } catch (e) {
       console.error(e);
       message.error('获取模型列表失败，请检查配置');
@@ -645,9 +492,7 @@ function App() {
 
   // 当配置抽屉打开且有 API Key 时，如果列表为空，自动获取一次
   React.useEffect(() => {
-    if (configVisible && config.apiKey && models.length === 0) {
-      fetchModels();
-    }
+    if (!configVisible) return;
   }, [configVisible]);
 
   const handleAddTask = () => {
@@ -995,7 +840,6 @@ function App() {
   const fastestTimeStr = formatDuration(globalStats.fastestTime);
 
   const slowestTimeStr = formatDuration(globalStats.slowestTime);
-  const backendSwitchChecked = backendMode || backendAuthPending;
 
   return (
     <ConfigProvider
@@ -1096,7 +940,7 @@ function App() {
               size="large"
               className="mobile-hidden"
             >
-              系统配置
+              生成设置
             </Button>
             <Button 
               icon={<SettingFilled />} 
@@ -1113,6 +957,30 @@ function App() {
             >
               新建任务
             </Button>
+            {onLogout ? (
+              <>
+                <Button
+                  icon={<LogoutOutlined />}
+                  onClick={onLogout}
+                  size="large"
+                  className="mobile-hidden"
+                  style={{
+                    background: 'rgba(255,255,255,0.6)',
+                    border: '1px solid #FF9EB5',
+                    color: '#FF9EB5'
+                  }}
+                >
+                  退出登录
+                </Button>
+                <Button
+                  icon={<LogoutOutlined />}
+                  onClick={onLogout}
+                  size="large"
+                  shape="circle"
+                  className="desktop-hidden circle-icon-btn"
+                />
+              </>
+            ) : null}
           </Space>
         </Header>
         
@@ -1283,25 +1151,11 @@ function App() {
           form={form}
           onClose={() => {
             setConfigVisible(false);
-            if (backendAuthPending) {
-              handleBackendAuthCancel();
-            }
           }}
           onConfigChange={handleConfigChange}
           models={models}
           loadingModels={loadingModels}
           fetchModels={fetchModels}
-          backendSwitchChecked={backendSwitchChecked}
-          backendSyncing={backendSyncing}
-          backendAuthLoading={backendAuthLoading}
-          backendMode={backendMode}
-          backendAuthPending={backendAuthPending}
-          backendPassword={backendPassword}
-          onBackendPasswordChange={setBackendPassword}
-          onBackendEnable={handleBackendEnable}
-          onBackendDisable={handleBackendDisable}
-          onBackendAuthCancel={handleBackendAuthCancel}
-          onBackendAuthConfirm={handleBackendAuthConfirm}
         />
 
       </Layout>
