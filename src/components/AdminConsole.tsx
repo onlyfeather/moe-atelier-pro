@@ -65,6 +65,8 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ username, onLogout }) => {
   const [activeTab, setActiveTab] = React.useState('config')
   const [configForm] = Form.useForm<AdminConfig>()
   const [configLoading, setConfigLoading] = React.useState(false)
+  const watchedApiFormat = (Form.useWatch('apiFormat', configForm) || 'openai') as ApiFormat
+  const apiUrlPlaceholder = DEFAULT_API_BASES[watchedApiFormat] || DEFAULT_API_BASES.openai
   const [modelOptions, setModelOptions] = React.useState<{ label: string; value: string }[]>([])
   const [modelLoading, setModelLoading] = React.useState(false)
   const [users, setUsers] = React.useState<AdminUser[]>([])
@@ -278,18 +280,8 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ username, onLogout }) => {
                       <Radio.Button value="vertex">Vertex</Radio.Button>
                     </Radio.Group>
                   </Form.Item>
-                  <Form.Item
-                    name="apiUrl"
-                    label="API 接口地址"
-                    shouldUpdate={(prev, cur) =>
-                      (prev as any).apiFormat !== (cur as any).apiFormat
-                    }
-                  >
-                    {({ getFieldValue }) => {
-                      const formatValue = (getFieldValue('apiFormat') || 'openai') as ApiFormat
-                      const placeholder = DEFAULT_API_BASES[formatValue] || DEFAULT_API_BASES.openai
-                      return <Input placeholder={placeholder} />
-                    }}
+                  <Form.Item name="apiUrl" label="API 接口地址">
+                    <Input placeholder={apiUrlPlaceholder} />
                   </Form.Item>
                   <Form.Item name="apiKey" label="API Key">
                     <Input.Password placeholder="输入 API Key" />
