@@ -69,7 +69,7 @@ const Root: React.FC = () => {
       })
       setUser(data.user)
       message.success('登录成功')
-    } catch (err) {
+    } catch (err: any) {
       if (err?.errorFields) return
       console.error(err)
       message.error('登录失败，请检查账号或验证码')

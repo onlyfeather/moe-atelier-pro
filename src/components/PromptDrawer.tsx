@@ -461,7 +461,6 @@ const DEFAULT_DATA_SOURCE = 'https://raw.githubusercontent.com/unknowlei/nanoban
 const BUILTIN_SOURCES = [
   { label: 'nanobanana-website', value: DEFAULT_DATA_SOURCE }
 ];
-const PROMO_NOTE_PATTERNS = [/labnana/i, /aff=/i, /邀请链接/, /分享给你试试/, /通过我的邀请链接/];
 const NSFW_KEYWORDS = ['猎奇', '恐怖'];
 
 const hasNsfwKeyword = (value: string) => {
@@ -469,82 +468,6 @@ const hasNsfwKeyword = (value: string) => {
   return NSFW_KEYWORDS.some(keyword => normalized.includes(keyword));
 };
 
-const sanitizePromoNotes = (text?: string) => {
-  if (!text) return '';
-  const lines = text
-    .split(/\r?\n/)
-    .map(line => line.trim())
-    .filter(line => line.length > 0)
-    .filter(line => !PROMO_NOTE_PATTERNS.some(pattern => pattern.test(line)));
-  return lines.join('\n');
-};
-
-const normalizePromptManagerRefs = (refs: unknown): string[] => {
-  if (!Array.isArray(refs)) return [];
-  return refs
-    .map((ref) => {
-      if (!ref || typeof ref !== 'object') return null;
-      const record = ref as Record<string, unknown>;
-      const filePath = typeof record.file_path === 'string' ? record.file_path : '';
-      if (!filePath) return null;
-      if (record.is_placeholder === true || filePath.includes('{{')) return null;
-      const position = typeof record.position === 'number' ? record.position : Number.POSITIVE_INFINITY;
-      return { filePath, position };
-    })
-    .filter((value): value is { filePath: string; position: number } => Boolean(value))
-    .sort((a, b) => a.position - b.position)
-    .map((ref) => ref.filePath);
-};
-
-const normalizePromptManagerTimestamp = (createdAt?: string) => {
-  if (!createdAt) return null;
-  const normalized = createdAt.replace(/\.(\d{3})\d+/, '.$1');
-  const iso = /Z|[+-]\d{2}:\d{2}$/.test(normalized) ? normalized : `${normalized}Z`;
-  const time = Date.parse(iso);
-  return Number.isNaN(time) ? null : time;
-};
-
-const buildPromptManagerId = (item: Record<string, unknown>, index: number) => {
-  const createdAt = typeof item.created_at === 'string' ? item.created_at : '';
-  const timestamp = normalizePromptManagerTimestamp(createdAt);
-  const baseId = (typeof item.id === 'string' || typeof item.id === 'number') ? item.id : index;
-  if (timestamp) {
-    return `imported-${timestamp}-${baseId}`;
-  }
-  return `pm-${baseId}`;
-};
-
-const normalizePromptManagerData = (payload: { data?: Record<string, unknown>[] }): PromptData => {
-  const items = Array.isArray(payload?.data) ? payload.data : [];
-  const prompts = items.map((item, index) => {
-    const fallbackId = (typeof item.id === 'string' || typeof item.id === 'number') ? item.id : index;
-    const createdAt = normalizePromptManagerTimestamp(typeof item.created_at === 'string' ? item.created_at : '');
-    const notes = sanitizePromoNotes(typeof item.description === 'string' ? item.description : '');
-    const imageUrl = (typeof item.file_path === 'string' && item.file_path)
-      || (typeof item.thumbnail_path === 'string' && item.thumbnail_path)
-      || '';
-    const tags = Array.isArray(item.tags) ? item.tags.filter(tag => typeof tag === 'string' && tag.length > 0) : undefined;
-    const refImages = normalizePromptManagerRefs(item.refs);
-    return {
-      id: buildPromptManagerId(item, index),
-      title: typeof item.title === 'string' && item.title ? item.title : `未命名-${fallbackId}`,
-      content: typeof item.prompt === 'string' ? item.prompt : '',
-      createdAt: createdAt ?? undefined,
-      tags: tags && tags.length > 0 ? tags : undefined,
-      contributor: typeof item.author === 'string' && item.author ? item.author : undefined,
-      notes: notes || undefined,
-      images: imageUrl ? [imageUrl] : undefined,
-      refs: refImages.length > 0 ? refImages : undefined
-    };
-  });
-  return {
-    sections: [
-      {
-        prompts
-      }
-    ]
-  };
-};
 
 const parsePromptTimestamp = (text: string) => {
   if (!text) return null;

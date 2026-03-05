@@ -45,9 +45,6 @@ import {
   type ApiFormat,
   extractVertexProjectId,
   inferApiVersionFromUrl,
-  normalizeApiBase,
-  resolveApiUrl,
-  resolveApiVersion,
 } from './utils/apiUrl';
 import { safeStorageSet } from './utils/storage';
 import { calculateSuccessRate, formatDuration } from './utils/stats';

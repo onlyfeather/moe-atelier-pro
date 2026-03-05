@@ -156,7 +156,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ username, onLogout }) => {
         modelWhitelist: Array.isArray(values.modelWhitelist) ? values.modelWhitelist : [],
       })
       message.success('全局配置已保存')
-    } catch (err) {
+    } catch (err: any) {
       if (err?.errorFields) return
       console.error(err)
       message.error('保存配置失败')
@@ -192,7 +192,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ username, onLogout }) => {
       message.success('用户创建成功')
       createForm.resetFields()
       void loadUsers()
-    } catch (err) {
+    } catch (err: any) {
       if (err?.errorFields) return
       console.error(err)
       message.error('创建用户失败')
@@ -281,9 +281,15 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ username, onLogout }) => {
                   <Form.Item
                     name="apiUrl"
                     label="API 接口地址"
-                    shouldUpdate={(prev, cur) => prev.apiFormat !== cur.apiFormat}
+                    shouldUpdate={(prev, cur) =>
+                      (prev as any).apiFormat !== (cur as any).apiFormat
+                    }
                   >
-                    <Input placeholder={DEFAULT_API_BASES.openai} />
+                    {({ getFieldValue }) => {
+                      const formatValue = (getFieldValue('apiFormat') || 'openai') as ApiFormat
+                      const placeholder = DEFAULT_API_BASES[formatValue] || DEFAULT_API_BASES.openai
+                      return <Input placeholder={placeholder} />
+                    }}
                   </Form.Item>
                   <Form.Item name="apiKey" label="API Key">
                     <Input.Password placeholder="输入 API Key" />
@@ -294,7 +300,12 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ username, onLogout }) => {
                       allowClear
                     />
                   </Form.Item>
-                  <Form.Item noStyle shouldUpdate={(prev, cur) => prev.apiFormat !== cur.apiFormat}>
+                  <Form.Item
+                    noStyle
+                    shouldUpdate={(prev, cur) =>
+                      (prev as any).apiFormat !== (cur as any).apiFormat
+                    }
+                  >
                     {({ getFieldValue }) => {
                       const format = getFieldValue('apiFormat')
                       if (format !== 'vertex') return null
