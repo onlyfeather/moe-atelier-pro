@@ -13,7 +13,8 @@ import {
   CopyOutlined, CompassFilled, CloudUploadOutlined,
   EyeInvisibleOutlined, ArrowLeftOutlined,
   InfoCircleFilled,
-  CloudSyncOutlined
+  CloudSyncOutlined,
+  GlobalOutlined
 } from '@ant-design/icons';
 import type { PromptData, PromptItem } from '../types/prompt';
 import { safeStorageGet, safeStorageSet } from '../utils/storage';
@@ -461,17 +462,15 @@ const MIRROR_DATA_SOURCE =
   'https://cdn.jsdelivr.net/gh/unknowlei/nanobanana-website@main/public/data.json';
 const ORIGINAL_DATA_SOURCE =
   'https://raw.githubusercontent.com/unknowlei/nanobanana-website/refs/heads/main/public/data.json';
-const DEFAULT_DATA_SOURCE = MIRROR_DATA_SOURCE;
+const DEFAULT_DATA_SOURCE = ORIGINAL_DATA_SOURCE;
 const normalizeDataSource = (value?: string | null) => {
   if (!value) return DEFAULT_DATA_SOURCE;
-  if (value === ORIGINAL_DATA_SOURCE || value === MIRROR_DATA_SOURCE) {
-    return value;
-  }
+  if (value === MIRROR_DATA_SOURCE) return ORIGINAL_DATA_SOURCE;
+  if (value === ORIGINAL_DATA_SOURCE) return value;
   return value;
 };
 const BUILTIN_SOURCES = [
-  { label: 'nanobanana-website (mirror)', value: MIRROR_DATA_SOURCE },
-  { label: 'nanobanana-website (origin)', value: ORIGINAL_DATA_SOURCE },
+  { label: 'nanobanana-website', value: ORIGINAL_DATA_SOURCE },
 ];
 const NSFW_KEYWORDS = ['猎奇', '恐怖'];
 
@@ -1383,8 +1382,9 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
                 )}
                 {mobileSourceVisible && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
-                    <div style={{ display: 'flex', gap: 8 }}>
-                       <Select
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <GlobalOutlined style={{ color: COLORS.primary }} />
+                      <Select
                         size="large"
                         style={{ flex: 1 }}
                         value={isBuiltInSource ? sourceUrl : 'custom'}
@@ -1447,6 +1447,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
                       投稿
                     </Button>
                   )}
+                  <GlobalOutlined style={{ color: COLORS.primary }} />
                   <Select
                     style={{ width: 180 }}
                     value={isBuiltInSource ? sourceUrl : 'custom'}

@@ -112,7 +112,7 @@ const Root: React.FC = () => {
                 </Title>
                 <Text type="secondary">请输入管理员预创建的账号</Text>
               </div>
-              <Form form={form} layout="vertical">
+              <Form form={form} layout="vertical" onFinish={handleLogin}>
                 <Form.Item name="username" label="用户名" rules={[{ required: true }]}>
                   <Input placeholder="请输入用户名" />
                 </Form.Item>
@@ -143,7 +143,7 @@ const Root: React.FC = () => {
                   }}
                   dangerouslySetInnerHTML={{ __html: captchaSvg }}
                 />
-                <Button type="primary" block onClick={handleLogin} loading={loginLoading}>
+                <Button type="primary" block htmlType="submit" loading={loginLoading}>
                   登录
                 </Button>
               </Form>
