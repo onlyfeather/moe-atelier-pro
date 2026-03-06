@@ -457,9 +457,21 @@ const PromptCard: React.FC<PromptCardProps> = ({
   );
 };
 
-const DEFAULT_DATA_SOURCE = 'https://raw.githubusercontent.com/unknowlei/nanobanana-website/refs/heads/main/public/data.json';
+const MIRROR_DATA_SOURCE =
+  'https://cdn.jsdelivr.net/gh/unknowlei/nanobanana-website@main/public/data.json';
+const ORIGINAL_DATA_SOURCE =
+  'https://raw.githubusercontent.com/unknowlei/nanobanana-website/refs/heads/main/public/data.json';
+const DEFAULT_DATA_SOURCE = MIRROR_DATA_SOURCE;
+const normalizeDataSource = (value?: string | null) => {
+  if (!value) return DEFAULT_DATA_SOURCE;
+  if (value === ORIGINAL_DATA_SOURCE || value === MIRROR_DATA_SOURCE) {
+    return value;
+  }
+  return value;
+};
 const BUILTIN_SOURCES = [
-  { label: 'nanobanana-website', value: DEFAULT_DATA_SOURCE }
+  { label: 'nanobanana-website (mirror)', value: MIRROR_DATA_SOURCE },
+  { label: 'nanobanana-website (origin)', value: ORIGINAL_DATA_SOURCE },
 ];
 const NSFW_KEYWORDS = ['猎奇', '恐怖'];
 
@@ -520,7 +532,9 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
   const screens = useBreakpoint();
   const isMobile = !screens.md;
 
-  const [sourceUrl, setSourceUrl] = useState<string>(() => safeStorageGet(STORAGE_KEY_SOURCE) || DEFAULT_DATA_SOURCE);
+  const [sourceUrl, setSourceUrl] = useState<string>(() =>
+    normalizeDataSource(safeStorageGet(STORAGE_KEY_SOURCE)),
+  );
   const [data, setData] = useState<PromptData | null>(null);
   const [loading, setLoading] = useState(false);
   const isBuiltInSource = BUILTIN_SOURCES.some(source => source.value === sourceUrl);
@@ -818,9 +832,18 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
   // 数据处理
   const allPrompts = useMemo(() => {
     if (!data) return [];
-    return data.sections.flatMap(section => 
-      section.prompts.map(p => ({ ...p, sectionId: section.id, sectionTitle: section.title }))
+    const sections = Array.isArray(data.sections) ? data.sections : [];
+    const sectionPrompts = sections.flatMap((section) =>
+      Array.isArray(section?.prompts)
+        ? section.prompts.map((p) => ({
+            ...p,
+            sectionId: section.id,
+            sectionTitle: section.title,
+          }))
+        : [],
     );
+    const rootPrompts = Array.isArray(data.prompts) ? data.prompts : [];
+    return [...sectionPrompts, ...rootPrompts];
   }, [data]);
 
   const newPrompts = useMemo(() => allPrompts.filter(isNewItem), [allPrompts]);
