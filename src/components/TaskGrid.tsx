@@ -35,6 +35,7 @@ interface TaskGridProps {
   backendMode: boolean;
   collectionRevision: number;
   onRemoveTask: (id: string) => void;
+  onDuplicateTask: (id: string) => void;
   onStatsUpdate: (type: 'request' | 'success' | 'fail', duration?: number) => void;
   onCollect: (item: CollectionItem) => void;
   onReorder: (nextTasks: TaskConfig[]) => void;
@@ -45,6 +46,7 @@ interface SortableTaskItemProps {
   config: AppConfig;
   backendMode: boolean;
   onRemove: (id: string) => void;
+  onDuplicate: (id: string) => void;
   onStatsUpdate: (type: 'request' | 'success' | 'fail', duration?: number) => void;
   onCollect: (item: CollectionItem) => void;
   collectionRevision: number;
@@ -58,6 +60,7 @@ const SortableTaskItem = ({
   config,
   backendMode,
   onRemove,
+  onDuplicate,
   onStatsUpdate,
   onCollect,
   collectionRevision,
@@ -84,6 +87,7 @@ const SortableTaskItem = ({
           config={config}
           backendMode={backendMode}
           onRemove={() => onRemove(task.id)}
+          onDuplicate={() => onDuplicate(task.id)}
           onStatsUpdate={onStatsUpdate}
           onCollect={onCollect}
           collectionRevision={collectionRevision}
@@ -101,6 +105,7 @@ const TaskGrid: React.FC<TaskGridProps> = ({
   backendMode,
   collectionRevision,
   onRemoveTask,
+  onDuplicateTask,
   onStatsUpdate,
   onCollect,
   onReorder,
@@ -196,6 +201,7 @@ const TaskGrid: React.FC<TaskGridProps> = ({
               config={config}
               backendMode={backendMode}
               onRemove={onRemoveTask}
+              onDuplicate={onDuplicateTask}
               onStatsUpdate={onStatsUpdate}
               onCollect={onCollect}
               collectionRevision={collectionRevision}

@@ -21,7 +21,7 @@ import ConfigDrawer from './components/ConfigDrawer';
 import type { AppConfig, TaskConfig } from './types/app';
 import type { CollectionItem } from './types/collection';
 import type { GlobalStats } from './types/stats';
-import type { PersistedUploadImage } from './types/imageTask';
+import type { PersistedImageTaskState, PersistedUploadImage } from './types/imageTask';
 import {
   cleanupTaskCache,
   cleanupUnusedImageCache,
@@ -48,12 +48,13 @@ import {
 } from './utils/apiUrl';
 import { safeStorageSet } from './utils/storage';
 import { calculateSuccessRate, formatDuration } from './utils/stats';
-import { TASK_STATE_VERSION, saveTaskState, DEFAULT_TASK_STATS } from './components/imageTaskState';
+import { TASK_STATE_VERSION, loadTaskState, saveTaskState, DEFAULT_TASK_STATS } from './components/imageTaskState';
 import {
   deleteBackendTask,
   fetchBackendCollection,
   fetchBackendModels,
   fetchBackendState,
+  fetchBackendTask,
   buildBackendStreamUrl,
   patchBackendState,
   putBackendTask,
@@ -631,6 +632,49 @@ function App({ onLogout }: AppProps) {
     setTasks(tasks.filter((t: TaskConfig) => t.id !== id));
   };
 
+  const handleDuplicateTask = async (id: string) => {
+    const newTaskId = uuidv4();
+    try {
+      let sourceState: PersistedImageTaskState | null = null;
+      if (backendMode) {
+        sourceState = await fetchBackendTask(id);
+      } else {
+        sourceState = loadTaskState(getTaskStorageKey(id));
+      }
+
+      const prompt = sourceState?.prompt ?? '';
+      const nextState: PersistedImageTaskState = {
+        version: TASK_STATE_VERSION,
+        prompt,
+        concurrency: sourceState?.concurrency ?? 2,
+        enableSound:
+          typeof sourceState?.enableSound === 'boolean' ? sourceState.enableSound : true,
+        results: [],
+        uploads: sourceState?.uploads ?? [],
+        stats: { ...DEFAULT_TASK_STATS },
+      };
+
+      if (backendMode) {
+        await putBackendTask(newTaskId, nextState);
+      } else {
+        saveTaskState(getTaskStorageKey(newTaskId), nextState);
+      }
+
+      setTasks((prev) => {
+        const index = prev.findIndex((item) => item.id === id);
+        const nextItem = { id: newTaskId, prompt };
+        if (index === -1) return [...prev, nextItem];
+        const next = [...prev];
+        next.splice(index + 1, 0, nextItem);
+        return next;
+      });
+      message.success('已复制任务');
+    } catch (err) {
+      console.error(err);
+      message.error('复制任务失败');
+    }
+  };
+
   const handleConfigChange = (changedValues: any, allValues: AppConfig) => {
     const nextFormat = allValues.apiFormat || config.apiFormat;
     let nextConfig = { ...config, ...allValues, apiFormat: nextFormat };
@@ -1117,6 +1161,7 @@ function App({ onLogout }: AppProps) {
             backendMode={backendMode}
             collectionRevision={collectionRevision}
             onRemoveTask={handleRemoveTask}
+            onDuplicateTask={handleDuplicateTask}
             onStatsUpdate={updateGlobalStats}
             onCollect={handleCollect}
             onReorder={handleReorderTasks}

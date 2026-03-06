@@ -4,7 +4,7 @@ import {
   Space, Typography, Tooltip, Progress
 } from 'antd';
 import { 
-  UploadOutlined, DeleteFilled, ReloadOutlined, 
+  UploadOutlined, DeleteFilled, CopyOutlined, ReloadOutlined, 
   BellFilled, BellOutlined, DownloadOutlined, PictureFilled,
   CloseCircleFilled, PauseCircleFilled, FireFilled,
   StarFilled,
@@ -60,6 +60,7 @@ interface ImageTaskProps {
   config: AppConfig;
   backendMode: boolean;
   onRemove: () => void;
+  onDuplicate?: () => void;
   onStatsUpdate: (type: 'request' | 'success' | 'fail', duration?: number) => void;
   onCollect?: (item: CollectionItem) => void;
   collectionRevision?: number;
@@ -138,7 +139,7 @@ const normalizeConcurrency = (value: unknown, fallback = DEFAULT_CONCURRENCY) =>
   return Math.max(1, Math.floor(value));
 };
 
-const ImageTask: React.FC<ImageTaskProps> = ({ id, storageKey, config, backendMode, onRemove, onStatsUpdate, onCollect, collectionRevision, dragAttributes, dragListeners }: ImageTaskProps) => {
+const ImageTask: React.FC<ImageTaskProps> = ({ id, storageKey, config, backendMode, onRemove, onDuplicate, onStatsUpdate, onCollect, collectionRevision, dragAttributes, dragListeners }: ImageTaskProps) => {
   const [prompt, setPrompt] = useState('');
   const promptRef = useRef(prompt);
   const promptFocusedRef = useRef(false);
@@ -1942,13 +1943,22 @@ const ImageTask: React.FC<ImageTaskProps> = ({ id, storageKey, config, backendMo
           }}>
             <PictureFilled style={{ fontSize: 14 }} />
           </div>
-          <Text strong style={{ fontSize: 14, color: '#665555' }}>任务 #{id.slice(0, 6).toUpperCase()}</Text>
-        </Space>
-        <Button 
-          type="text" 
-          danger 
-          icon={<DeleteFilled />} 
-          onClick={onRemove} 
+        <Text strong style={{ fontSize: 14, color: '#665555' }}>任务 #{id.slice(0, 6).toUpperCase()}</Text>
+      </Space>
+      {onDuplicate && (
+        <Button
+          type="text"
+          icon={<CopyOutlined />}
+          onClick={onDuplicate}
+          size="small"
+          style={{ color: '#FF9EB5', marginRight: 4 }}
+        />
+      )}
+      <Button 
+        type="text" 
+        danger 
+        icon={<DeleteFilled />} 
+        onClick={onRemove} 
           size="small"
           style={{ color: '#FFB7C5' }} 
         />
