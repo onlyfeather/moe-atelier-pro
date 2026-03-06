@@ -13,8 +13,7 @@ import {
   CopyOutlined, CompassFilled, CloudUploadOutlined,
   EyeInvisibleOutlined, ArrowLeftOutlined,
   InfoCircleFilled,
-  CloudSyncOutlined,
-  GlobalOutlined
+  CloudSyncOutlined
 } from '@ant-design/icons';
 import type { PromptData, PromptItem } from '../types/prompt';
 import { safeStorageGet, safeStorageSet } from '../utils/storage';
@@ -1383,7 +1382,6 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
                 {mobileSourceVisible && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <GlobalOutlined style={{ color: COLORS.primary }} />
                       <Select
                         size="large"
                         style={{ flex: 1 }}
@@ -1447,7 +1445,6 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
                       投稿
                     </Button>
                   )}
-                  <GlobalOutlined style={{ color: COLORS.primary }} />
                   <Select
                     style={{ width: 180 }}
                     value={isBuiltInSource ? sourceUrl : 'custom'}
