@@ -866,7 +866,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
       result = result.filter(p => 
         p.title.toLowerCase().includes(lowerSearch) || 
         p.content.toLowerCase().includes(lowerSearch) ||
-        p.tags?.some(t => t.toLowerCase().includes(lowerSearch)) ||
+        p.tags?.some((t: string) => t.toLowerCase().includes(lowerSearch)) ||
         (p.contributor && p.contributor.toLowerCase().includes(lowerSearch))
       );
     }
@@ -907,7 +907,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
     }
 
     contextPrompts.forEach(p => {
-      p.tags?.forEach(t => tags.add(t));
+      p.tags?.forEach((t: string) => tags.add(t));
     });
     return Array.from(tags).sort();
   }, [allPrompts, activeTab, favorites]);
@@ -938,7 +938,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
     if (contributorActiveSection !== 'all') {
       filtered = filtered.filter(p => p.sectionId === contributorActiveSection);
     }
-    filtered.forEach(p => p.tags?.forEach(t => tags.add(t)));
+    filtered.forEach(p => p.tags?.forEach((t: string) => tags.add(t)));
     return Array.from(tags).sort();
   }, [contributorPrompts, contributorActiveSection]);
 
@@ -948,7 +948,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
       result = result.filter(p => p.sectionId === contributorActiveSection);
     }
     if (contributorSelectedTags.length > 0) {
-      result = result.filter(p => contributorSelectedTags.every(t => p.tags?.includes(t)));
+      result = result.filter(p => contributorSelectedTags.every((t: string) => p.tags?.includes(t)));
     }
     return result;
   }, [contributorPrompts, contributorActiveSection, contributorSelectedTags]);

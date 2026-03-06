@@ -33,6 +33,7 @@ export interface PromptSection {
 
 export interface PromptData {
   sections: PromptSection[];
+  prompts?: PromptItem[];
   commonTags?: string[];
   siteNotes?: string;
   lastUpdated?: string;
