@@ -830,26 +830,35 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
   };
 
   // 数据处理
-  const allPrompts = useMemo(() => {
+  const allPrompts = useMemo<ExtendedPromptItem[]>(() => {
     if (!data) return [];
     const sections = Array.isArray(data.sections) ? data.sections : [];
-    const sectionPrompts = sections.flatMap((section) =>
+    const sectionPrompts: ExtendedPromptItem[] = sections.flatMap((section) =>
       Array.isArray(section?.prompts)
         ? section.prompts.map((p) => ({
             ...p,
-            sectionId: section.id,
-            sectionTitle: section.title,
+            sectionId: section.id || 'default',
+            sectionTitle: section.title || '未分类',
           }))
         : [],
     );
-    const rootPrompts = Array.isArray(data.prompts) ? data.prompts : [];
+    const rootPrompts: ExtendedPromptItem[] = Array.isArray(data.prompts)
+      ? data.prompts.map((p) => ({
+          ...p,
+          sectionId: 'default',
+          sectionTitle: '未分类',
+        }))
+      : [];
     return [...sectionPrompts, ...rootPrompts];
   }, [data]);
 
-  const newPrompts = useMemo(() => allPrompts.filter(isNewItem), [allPrompts]);
+  const newPrompts = useMemo<ExtendedPromptItem[]>(
+    () => allPrompts.filter(isNewItem),
+    [allPrompts],
+  );
 
-  const filteredPrompts = useMemo(() => {
-    let result = allPrompts;
+  const filteredPrompts = useMemo<ExtendedPromptItem[]>(() => {
+    let result: ExtendedPromptItem[] = allPrompts;
 
     // Filter by Tab
     if (activeTab === 'favorites') {
@@ -889,7 +898,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
       .map(({ prompt }) => prompt);
   }, [allPrompts, activeTab, searchText, selectedTags, favorites]);
 
-  const paginatedPrompts = useMemo(() => {
+  const paginatedPrompts = useMemo<ExtendedPromptItem[]>(() => {
     const start = (currentPage - 1) * PAGE_SIZE;
     return filteredPrompts.slice(start, start + PAGE_SIZE);
   }, [filteredPrompts, currentPage]);
@@ -912,7 +921,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
     return Array.from(tags).sort();
   }, [allPrompts, activeTab, favorites]);
 
-  const contributorPrompts = useMemo(() => {
+  const contributorPrompts = useMemo<ExtendedPromptItem[]>(() => {
     if (!selectedContributor) return [];
     return allPrompts.filter(p => {
       const pContributor = p.contributor || '匿名';
@@ -942,8 +951,8 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
     return Array.from(tags).sort();
   }, [contributorPrompts, contributorActiveSection]);
 
-  const filteredContributorPrompts = useMemo(() => {
-    let result = contributorPrompts;
+  const filteredContributorPrompts = useMemo<ExtendedPromptItem[]>(() => {
+    let result: ExtendedPromptItem[] = contributorPrompts;
     if (contributorActiveSection !== 'all') {
       result = result.filter(p => p.sectionId === contributorActiveSection);
     }
@@ -953,7 +962,7 @@ const PromptDrawer: React.FC<PromptDrawerProps> = ({ visible, onClose, onCreateT
     return result;
   }, [contributorPrompts, contributorActiveSection, contributorSelectedTags]);
 
-  const paginatedContributorPrompts = useMemo(() => {
+  const paginatedContributorPrompts = useMemo<ExtendedPromptItem[]>(() => {
     const start = (contributorPage - 1) * PAGE_SIZE;
     return filteredContributorPrompts.slice(start, start + PAGE_SIZE);
   }, [filteredContributorPrompts, contributorPage]);
